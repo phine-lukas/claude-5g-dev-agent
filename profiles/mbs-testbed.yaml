@@ -1,0 +1,107 @@
+name: mbs-testbed
+description: >-
+  MBS development — private OAI RAN fork + 5G-MAG Open5GS MBS core + the
+  frq-adsat-phine testbed. The testbed repo carries all three as submodules,
+  so it is both the test repo and the record of which versions belong together.
+
+spec_tags: [mbs, ran, cn]
+stack_skills: [oai-ran, open5gs-mbs]
+
+repos:
+  - name: openairinterface5g-private
+    role: target
+    github: phinetech/openairinterface5g-private
+    base_branch: mbs-phase-a
+    upstream: https://github.com/OPENAIRINTERFACE/openairinterface5g
+    # The fork also keeps gitlab.eurecom.fr/oai/openairinterface5g; use whichever
+    # remote the session's checkout actually has for `git log <upstream>..HEAD`.
+    local_path: ~/Projects/projects/oai-phinetech
+    notes: >-
+      Read MBS-REBASE-NOTES.md and AGENTS.md at the repo root before planning.
+      The branch carries ~25 MBS commits above upstream/develop.
+
+  - name: 5g-mag-open5gs
+    role: target
+    optional: true                 # only when the task touches the core
+    github: 5G-MAG/open5gs
+    # The testbed pins an exact commit; that is the default base. Override in the
+    # task when the change is meant to go upstream to 5G-MAG.
+    base_ref: submodule-pin
+    submodule: frq-adsat-phine:5g-mag-open5gs
+    alternatives: ["5mbs", "5mbs-development", "latest tag"]
+    upstream: https://github.com/open5gs/open5gs
+    # The only local checkout is the testbed's submodule (a real git repo, but on a
+    # detached HEAD). /apply-delivery branches from the base commit there as usual;
+    # remember that landing the change also means bumping the submodule pin in
+    # frq-adsat-phine. Point this at a standalone clone if you make one.
+    local_path: ~/Projects/projects/frq-adsat-phine/5g-mag-open5gs
+    notes: >-
+      MB-SMF is open5gs-smfd and MB-UPF is open5gs-upfd — not separate daemons.
+      There are no MBS unit tests in this repo; see the open5gs-mbs skill.
+
+  - name: frq-adsat-phine
+    role: test
+    github: phinetech/frq-adsat-phine
+    base_branch: main
+    local_path: ~/Projects/projects/frq-adsat-phine
+    notes: >-
+      Submodules: openairinterface5g (the private fork), 5g-mag-open5gs,
+      open5gs (upstream, kept for reference). Other branches in use:
+      tests/acceptance-runbooks, feat-ntn-setup, fix-split-ho-wo-restart.
+
+tests:
+  T0:
+    cloud: yes
+    notes: >-
+      RAN: cd build && cmake .. -GNinja && ninja nr-softmodem nr-uesoftmodem.
+      Core: meson setup --prefix=$PWD/install build && ninja -C build.
+      Via the testbed: ./gnb/build.sh, ./ue/build.sh, ./core/build.sh --skip-tests.
+  T1:
+    cloud: yes
+    notes: >-
+      RAN: ctest -E '^physim\.|^benchmark_' in build/.
+      Core: meson test -C build --suite unit -v — but note there are NO MBS tests
+      in the 5G-MAG fork, so a core-only change has nothing to extend.
+  T2:
+    cloud: maybe
+    notes: >-
+      RAN PHY/MAC simulators relevant to MBS: ctest -L quick_physim, or run
+      nr_dlsim / nr_ulsim from build/ directly. Core: the scenario suites under
+      tests/ (registration, attach, transfer) — none of them cover MBS.
+  T3:
+    cloud: opt-in
+    timebox_min: 45
+    notes: >-
+      Testbed compose: docker compose up -d mongo core gnb1 ue1, images
+      frq_open5gs_core / frq_oai_gnb / frq_oai_ue built from the repo root.
+      Needs docker+compose, /dev/net/tun, multicast on the bridge. Runs only
+      when the task contains E2E.
+  T4:
+    cloud: no
+    notes: >-
+      Entry points in frq-adsat-phine:
+        ./scripts/test-mbs.sh [--multicast 239.0.0.26]  — full MBS broadcast flow
+        runme run --all --filename tests/mbs-tn.md      — MBS acceptance runbook
+        runme run --all --filename tests/ntn.md         — NTN runbook
+        docs/mbs-performance-testing.md                 — throughput/jitter/loss/latency
+        testbed/<scenario>/                             — mbs-test, mbs-tn-a, mbs-tn-b,
+                                                          split, split-ho, ntn-ext,
+                                                          ntn-tn-ho, multi-gnb-rfsim
+      The PTM-to-PTP eBPF program (./ptm-to-ptp/build.sh) hardcodes the gNB IP —
+      see the testbed README before changing addressing.
+
+constraints:
+  - "Never contact lab hosts from the cloud."
+  - >-
+    Never mix upstream Open5GS daemons with 5G-MAG shared libraries in one runtime:
+    the fork breaks ABI (e.g. ogs_diam_logger_self was removed) and upstream binaries
+    die before main(). The testbed builds every daemon from the 5G-MAG fork.
+  - >-
+    Reading the gNB's MBS traces needs nr_mac_log_level and nr_phy_dci_log_level at
+    info; the testbed ships them at error, which silently hides every MBS: line.
+  - >-
+    Rebuild the container images after every code change before an E2E run — Docker
+    layer caching will otherwise serve a stale binary from the final stage.
+  - >-
+    The OAI 5G Core (oai-cn5g-*) has no MBS support at all. An MBS core change belongs
+    in the 5G-MAG fork; if a task asks for it in an OAI NF, stop and ask.

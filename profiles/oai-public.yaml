@@ -1,0 +1,120 @@
+name: oai-public
+description: >-
+  Public OpenAirInterface — RAN on develop plus the OAI 5G Core NFs and the
+  oai-cn5g-fed federation repo, whose docker-compose tutorials and Robot
+  Framework suites are the integration tests.
+
+spec_tags: [ran, cn]
+stack_skills: [oai-ran, oai-cn]
+
+repos:
+  - name: openairinterface5g
+    role: target
+    github: OPENAIRINTERFACE/openairinterface5g
+    # Development happens on GitLab; GitHub is a mirror. Use whichever remote the
+    # session's checkout has.
+    upstream: https://gitlab.eurecom.fr/oai/openairinterface5g
+    base_branch: develop
+    local_path: ~/Projects/OAI/openairinterface5g
+    notes: >-
+      Read AGENTS.md and doc/BUILD.md at the repo root. The ASN.1 versions the code
+      compiles (38.331 V17.3.0, 38.473 V17.0.0, 38.413 V17.10.0) are pinned in each
+      protocol's MESSAGES/CMakeLists.txt — re-check them, they move.
+
+  - name: oai-cn5g-fed
+    role: target
+    optional: true
+    github: openairinterface/oai-cn5g-fed
+    base_branch: master
+    local_path: ~/Projects/OAI/oai-cn5g-fed
+    notes: >-
+      The umbrella: docker-compose/ deployments, test/*.robot suites, docs/DEPLOY_*.md
+      tutorials, ci-scripts/. Usually a test repo, but it is also where a new
+      deployment scenario or Robot suite is added.
+
+  # The NFs. Include only the ones a task actually touches — each is a separate
+  # checkout and a separate patch series.
+  - name: oai-cn5g-smf
+    role: target
+    optional: true
+    github: openairinterface/oai-cn5g-smf
+    base_branch: develop
+    local_path: ~/Projects/OAI/oai-cn5g-smf
+    notes: "Has the most real unit tests: src/smf_app/test/ (GoogleTest)."
+  - name: oai-cn5g-amf
+    role: target
+    optional: true
+    github: openairinterface/oai-cn5g-amf
+    base_branch: develop
+    local_path: ~/Projects/OAI/oai-cn5g-amf
+  - name: oai-cn5g-upf
+    role: target
+    optional: true
+    github: openairinterface/oai-cn5g-upf
+    base_branch: develop
+    local_path: ~/Projects/OAI/oai-cn5g-upf
+    notes: "Pins clang-format 19; check ci-scripts before reformatting."
+  - name: oai-cn5g-nrf
+    role: target
+    optional: true
+    github: openairinterface/oai-cn5g-nrf
+    base_branch: develop
+    local_path: ~/Projects/OAI/oai-cn5g-nrf
+  - name: oai-cn5g-pcf
+    role: target
+    optional: true
+    github: openairinterface/oai-cn5g-pcf
+    base_branch: develop
+    local_path: ~/Projects/OAI/oai-cn5g-pcf
+  # Other NFs follow the same pattern: ausf, udm, udr, udsf, nssf, nef, lmf,
+  # and oai-cn5g-common-src. Add the entry when a task needs one.
+
+tests:
+  T0:
+    cloud: yes
+    notes: >-
+      RAN: cd build && cmake .. -GNinja && ninja nr-softmodem nr-uesoftmodem.
+      CN NF: build/scripts/build_<nf> --clean --build-type Release --jobs, or
+      docker build --target oai-<nf> -f docker/Dockerfile.<nf>.ubuntu -t oai-<nf>:<tag> .
+  T1:
+    cloud: yes
+    notes: >-
+      RAN: ctest -E '^physim\.|^benchmark_' in build/.
+      CN NF: build/scripts/build_<nf> --tests, or the Docker `checks` stage
+      (docker build --target checks ...), which is what CI runs.
+  T2:
+    cloud: maybe
+    notes: >-
+      RAN PHY/MAC simulators: ctest -L quick_physim (< 3 min), or nr_dlsim / nr_ulsim /
+      nr_pbchsim from build/. Full physim needs -DENABLE_PHYSIM_TESTS=ON.
+      CN: a narrow Robot suite from oai-cn5g-fed/test/ against a minimal compose subset.
+  T3:
+    cloud: opt-in
+    timebox_min: 45
+    notes: >-
+      RAN: build ran-base, ran-build, oai-gnb, oai-nr-ue, oai-nr-cuup, then
+      cd ci-scripts && ./run_locally.sh xml_files/container_5g_rfsim.xml
+      (also container_5g_f1_rfsim.xml for CU/DU, container_5g_e1_rfsim.xml for CU-CP/UP).
+      CN: oai-cn5g-fed/docker-compose/core-network.py to deploy, then
+      robot test/<suite>.robot (all_nfs, smf_tests, smf_upf_tests, qos_tests,
+      policy_api_tests, Northbound, packetrusher_tests, omec_gnbsim_tests).
+      Swap your locally built image into the compose file's `image:` line first, or
+      the run proves nothing. Needs docker+compose, /dev/net/tun, ~8 GB RAM.
+      Runs only when the task contains E2E.
+  T4:
+    cloud: no
+    notes: >-
+      USRP/RF, COTS UEs, lab hosts. See the RAN repo's doc/NR_SA_Tutorial_*.md and
+      oai-cn5g-fed/docs/DEPLOY_SA5G_*.md for the local procedures.
+
+constraints:
+  - "Never push to, comment on, or open PRs against any OpenAirInterface repository."
+  - >-
+    An IE that exists only in a newer 3GPP release is a generated-ASN.1 grammar upgrade,
+    not a code change — it touches every generated file. Stop and ask before attempting it.
+  - >-
+    Format only the lines you touched (git clang-format <base-sha>); the repos differ in
+    which clang-format version CI enforces.
+  - >-
+    container_4g_rfsim_mbms.xml and container_4g_rfsim_fembms.xml are LTE eMBMS, not NR
+    MBS — do not treat them as NR MBS coverage.

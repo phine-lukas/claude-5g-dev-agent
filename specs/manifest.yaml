@@ -1,0 +1,40 @@
+# Spec manifest. ensure_specs.py makes sure every entry selected by tag/id
+# is downloaded and converted. `release` picks the latest version of that
+# release unless `version` pins one (x.y.z).
+#
+# IMPORTANT: align RAN specs with the ASN.1 version used in OAI
+# (see oai-ran skill). Override per entry with `version:`.
+defaults:
+  release: 18
+
+specs:
+  # --- Architecture / stage 2 ---
+  - { id: "23.247", title: "5G MBS architecture",                 tags: [mbs, cn, ran] }
+  - { id: "23.501", title: "5GS system architecture",             tags: [cn] }
+  - { id: "23.502", title: "5GS procedures",                      tags: [cn] }
+  - { id: "38.300", title: "NR overall description",              tags: [ran, mbs] }
+  - { id: "38.401", title: "NG-RAN architecture",                 tags: [ran] }
+
+  # --- RAN stage 3 ---
+  # Pinned to the ASN.1 grammar OAI actually compiles, not the newest release:
+  # openair2/RRC/NR/MESSAGES/CMakeLists.txt -> set(NR_RRC_VERSION 17 3 0)
+  - { id: "38.331", title: "NR RRC",                              tags: [ran, mbs], asn1: true, version: "17.3.0" }
+  - { id: "38.321", title: "NR MAC",                              tags: [ran, mbs] }
+  - { id: "38.322", title: "NR RLC",                              tags: [ran, mbs] }
+  - { id: "38.323", title: "NR PDCP",                             tags: [ran, mbs] }
+  - { id: "38.211", title: "NR physical channels and modulation", tags: [ran, mbs, phy] }
+  - { id: "38.212", title: "NR multiplexing and channel coding",  tags: [ran, mbs, phy] }
+  - { id: "38.213", title: "NR physical layer procedures for control", tags: [ran, mbs, phy] }
+  - { id: "38.214", title: "NR physical layer procedures for data",    tags: [ran, mbs, phy] }
+  - { id: "38.306", title: "NR UE radio access capabilities",     tags: [ran] }
+  # openair2/F1AP/MESSAGES/CMakeLists.txt -> set(F1AP_VERSION 17 0 0)
+  - { id: "38.473", title: "F1AP",                                tags: [ran, mbs, f1], asn1: true, version: "17.0.0" }
+  # openair3/NGAP/MESSAGES/CMakeLists.txt -> set(NGAP_VERSION 17 10 0)
+  - { id: "38.413", title: "NGAP",                                tags: [ran, cn, mbs, ng], asn1: true, version: "17.10.0" }
+
+  # --- Core stage 3 ---
+  - { id: "24.501", title: "5GS NAS",                             tags: [cn] }
+  - { id: "29.244", title: "PFCP (N4)",                           tags: [cn, mbs] }
+  - { id: "29.502", title: "Nsmf PDU session",                    tags: [cn] }
+  - { id: "29.532", title: "Nmbsmf MBS session management",       tags: [cn, mbs] }
+  - { id: "29.518", title: "Namf communication",                  tags: [cn] }

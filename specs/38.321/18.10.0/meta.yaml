@@ -1,0 +1,12 @@
+id: '38.321'
+title: NR MAC
+official_title: NR; Medium Access Control (MAC) protocol specification
+version: 18.10.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.321/38321-ia0.zip
+archive: 38321-ia0.zip
+sha256: fc77636b28c57293688e854a3585fcf6056da77d5570d51835d8772eedbe9446
+converted: '2026-11-05'
+documents: 1
+clause_files: 157
+asn1_blocks: 0

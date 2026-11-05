@@ -1,0 +1,1 @@
+### 5.22.1 SL-SCH Data and SL-PRS transmission
