@@ -201,4 +201,4 @@ None. No new config keys, no change to any existing default.
 
 | Date | Who | Answers / decision |
 |---|---|---|
-| | | |
+| 2026-11-09 | lukas.rotheneder@phine.tech | "go, both as recommended" — Q1: the misdirected `release_qfi()` in `select_upf_nodes()` is **not** fixed here, it goes into OPEN_ISSUES.md. Q2: **no** Robot patch series against `oai-cn5g-fed`; the manual T3/T4 procedure goes into TESTING.md. Delivery stays SMF-only. |
