@@ -5,5 +5,7 @@ Search with `scripts/spec_lookup.py`; cite as `TS <id> V<version> clause <n>`.
 
 | TS | Version | Title | ASN.1 | Converted | Contents |
 |---|---|---|---|---|---|
+| 23.501 | V18.12.0 | 5GS system architecture | — | 2026-11-09 | [toc](23.501/18.12.0/toc.md) |
+| 29.244 | V18.10.0 | PFCP (N4) | — | 2026-11-09 | [toc](29.244/18.10.0/toc.md) |
 | 38.321 | V18.10.0 | NR; Medium Access Control (MAC) protocol specification | — | 2026-11-05 | [toc](38.321/18.10.0/toc.md) |
 | 38.331 | V17.3.0 | NR; Radio Resource Control (RRC) protocol specification | yes | 2026-11-05 | [toc](38.331/17.3.0/toc.md) |

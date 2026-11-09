@@ -1,0 +1,37 @@
+# D.7 Guidance for underlay network to support QoS differentiation for User Plane IPsec Child SA
+
+## D.7.1 Network initiated QoS
+
+When UE is accessing an overlay network via an underlay network as described in clause D.3, in order to ensure the underlay network to support the QoS required by the overlay network User Plane IPsec Child SA, the QoS differentiation mechanism based on network-initiated QoS modification as described in clause 5.30.2.7 and clause 5.30.2.8 can be used with the following considerations:
+
+\- An overlay network service can have specific QoS requirement that needs to be fulfilled by the underlay network, based on SLA between the two networks.
+
+\- The SLA covers selective services of the overlay network which require QoS support in underlay network. The rest of the overlay network traffic could be handled in best efforts basis by underlay network.
+
+\- The SLA between the overlay network and the underlay network includes a mapping between DSCP values of the User Plane IPsec Child SAs and the QoS requirement of the overlay network services. The QoS requirement includes the QoS parameters described in clause 5.7.2 that are necessary (e.g. 5QI, ARP, etc.) during the network-initiated QoS modification in underlay network. In order to facilitate the SLA, a guidance for details of the mapping between DSCP values of the User Plane IPSec Child SAs and QoS requirement of the overlay network services is described of TS 29.513 \[133\]. The SLA also includes the N3IWF IP address of the overlay network.
+
+\- The mapping agreed in SLA is configured at N3IWF of the overlay network and at the SMF/PCF of the underlay network. If a dedicated DNN/S-NSSAI is used in the underlay network for providing access to the N3IWF in the overlay network, the SMF/PCF in the underlay network can be configured to enable packet detection (based on N3IWF IP address and DSCP value) for PDU sessions associated with the dedicated DNN/S-NSSAI.
+
+\- When UE establishes a PDU Session in underlay network, the PCF in the underlay network determines PCC rules based on UE subscription information and local configuration which takes into account the SLA described above and installs the PCC rules on the SMF which generates and installs PDR/URR on UPF. The PCC rules indicate N3IWF IP address and the DSCP values of the User Plane IPsec Child SAs of the overlay network which require QoS differentiation by the underlay network. So, the UPF in the underlay network can detect packets of the User Plane IPsec Child SAs corresponding to the overlay network services which require QoS support by the underlay network.
+
+\- UE registers and establishes PDU Session in the overlay network via the User Plane connectivity established in the underlay network. When UE is accessing a specific service of overlay network, a QoS Flow can be created by the overlay network, then N3IWF creates dedicated User Plane IPsec Child SA for each overlay network QoS Flow that requires underlay network QoS support.
+
+\- N3IWF uses the QoS profile and the Session-AMBR it receives from SMF in overlay network along with the mapping agreed in the SLA to derive a specific DSCP value for the User Plane IPsec Child SA. N3IWF assigns a specific DSCP value only to one User Plane IPsec Child SA for a UE at the same time. UE (for UL) and N3IWF (for DL) will set the DSCP marking in the outer IP header of the User Plane IPsec Child SA accordingly.
+
+\- The overlay network traffic between UE and N3IWF using the specific DSCP marking will be detected by the UPF in the underlay network, based on previous installed PDR/URR. The SMF/PCF in underlay network will be informed when the overlay network traffic is detected. Then the PCF installs new PCC rules on the SMF including the QoS parameters for handling of packets corresponding to the specific User Plane IPsec Child SA based on the N3IWF IP address and the DSCP value of the User Plane IPsec Child SA and the SMF generates a QoS profile that triggers the PDU Session Modification procedure as described in clause 4.3.3 of TS 23.502 \[3\]. The QoS parameters are derived from the mapping agreed in SLA based on the detected DSCP value.
+
+## D.7.2 UE initiated QoS
+
+When UE is accessing an overlay network via an underlay network as described in clause D.3, if UE-initiated QoS modification in clause 5.30.2.7 and clause 5.30.2.8 is used, the following principles can be considered to enable consistent QoS for User Plane IPsec Child SAs between the two networks:
+
+\- UE registers and establishes PDU Session in the overlay network via the User Plane connectivity established in the underlay network. When UE is accessing a specific service of overlay network, a QoS Flow in overlay network can be created according to clause 4.3.3 of TS 23.502 \[3\]. UE receives the QoS Flow level QoS parameters (e.g. 5QI, GFBR, MFBR, as specified in TS 24.501 \[47\]) from SMF/PCF in overlay network for the QoS Flow which is created for the specific overlay network service.
+
+\- N3IWF in overlay network creates dedicated User Plane IPsec Child SA for each overlay network QoS Flow that requires underlay network QoS support.
+
+\- In order to ensure the traffic of the overlay network service is handled with the desired QoS in underlay network, UE can request new QoS Flow for the PDU session in the underlay network, by PDU Session Modification procedure described in clause 4.3.3 of TS 23.502 \[3\]. The requested QoS can be derived from the QoS Flow level QoS parameters which the UE has received from the overlay network. The Packet Filter in the QoS rule of the request includes overlay network N3IWF IP address and SPI associated with the User Plane IPsec Child SA.
+
+\- SMF in the underlay network notifies the PCF that the UE has initiated resource modification, after receiving the PDU Session Modification Request. PCF in the underlay network determines if the request can be authorized based on UE subscription and local policy which can take into account the SLA between overlay network and underlay network. If the request is authorized, PCF generates new PCC rule and installs on SMF in order to create new QoS Flow in underlay network using the QoS Flow level QoS parameters from the overlay network. The PDR/FAR generated refers to the N3IWF IP address and the SPI (provided by the UE in Traffic filter in PDU Session Modification request) to enable filtering and mapping of DL traffic towards the right PDU Session/QoS Flow within the underlay network.
+
+\- If SLA exists, it can include a mapping between the DSCP values of the User Plane IPsec Child SAs and the QoS requirement of the overlay network services. The SLA is configured at N3IWF in overlay network and at SMF/PCF in underlay network. N3IWF can provide DSCP value to UE for the User Plane IPsec Child SA at PDU Session Establishment (clause 4.12.5, step 4a and 4c of TS 23.502 \[3\]). UE can include the DSCP value as an addition in the Packet Filter by initiating the PDU Session Modification procedure in the underlay network. PCF in the underlay network performs QoS authorization of UE QoS request considering the UE subscription and local configuration which takes into account the mapping in the SLA. Details of the mapping between DSCP values of the User Plane IPSec Child SAs and QoS requirement of the overlay network services is described in TS 29.513 \[133\].
+
+########  Annex E (informative): Communication models for NF/NF services interaction

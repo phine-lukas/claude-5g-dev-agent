@@ -1,0 +1,12 @@
+id: '29.244'
+title: PFCP (N4)
+official_title: ''
+version: 18.10.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/29_series/29.244/29244-ia0.zip
+archive: 29244-ia0.zip
+sha256: bd76067a6ca6ccd182b0a7454d1da004c1e0495c6950d677a4f39ef9edf61cf3
+converted: '2026-11-09'
+documents: 1
+clause_files: 322
+asn1_blocks: 0
