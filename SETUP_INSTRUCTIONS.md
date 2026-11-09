@@ -89,6 +89,7 @@ Rules while building:
 │   ├── spec_lookup.py                # §6.2
 │   ├── make_delivery.sh              # §6.3
 │   ├── push_delivery.sh              # §6.4
+│   ├── push_toolkit.sh               # §6.4b – toolkit changes to main
 │   ├── cloud_setup.sh                # §6.5 – pasted into cloud environment
 │   └── probe_env.sh                  # §6.6 – what can this VM run?
 ├── templates/
@@ -227,14 +228,21 @@ missing and ask the user to add them to the session (or provide URLs).
    long builds yet.
 
 ## Phase 2 – Plan and questions (MANDATORY STOP)
-1. Write the plan to `deliveries/<slug>/PLAN.md` using `templates/PLAN.md`.
-   `<slug>` = `YYYY-MM-DD-<component>-<short-feature-name>`, kebab-case.
-2. Post the plan IN THE CHAT (condensed, but complete), containing:
+This phase writes nothing to disk and commits nothing. The plan is a chat
+message, so the user can read it and decide whether the run starts at all; if
+it doesn't, no repo has been touched.
+
+1. Post the plan IN THE CHAT, complete — this is its only copy. Follow the
+   section order of `templates/PLAN.md`, kept compact (tables stay tables,
+   prose stays short):
    - Your understanding of the task in 3–5 sentences
-   - Spec basis: list of TS/clause references
-   - Current state in the repo (what exists, what's missing)
-   - Proposed commit series: one line per commit, with files touched
-   - Configuration changes (new config keys, defaults)
+   - Repos and base commits (repo, role, branch, base SHA)
+   - Spec basis: TS, version, clause, what it mandates — every row from
+     `scripts/spec_lookup.py`, never from memory
+   - Current state in the repo(s): what exists, what's missing
+   - Design decisions: for each real choice, the options and what you propose
+   - Proposed commit series per repo: one line per commit, with files touched
+   - Configuration changes (new config keys, defaults, compatibility)
    - Test plan: which unit tests you will add/extend; the test-tier table
      (tier → command → CAN RUN / MAYBE / LOCAL ONLY); which testbed scripts
      from the test repo apply locally, and whether they need changes
@@ -242,22 +250,28 @@ missing and ask the user to add them to the session (or provide URLs).
    - Risks and assumptions
    - **Numbered questions** — anything ambiguous in the task or spec,
      design choices with real trade-offs, scope boundaries
-3. Then END YOUR TURN — no notification, the plan and the questions stay in
-   the chat. Do not write code.
-4. Continue only after the user replies with approval ("go", "approved",
-   answers + "go", etc.). Incorporate answers into PLAN.md.
-5. Exception: if the task contains `AUTOPILOT` AND you have zero questions,
+2. Then END YOUR TURN — no file, no branch, no notification. Do not write code.
+3. Continue only after the user replies with approval ("go", "approved",
+   answers + "go", etc.). If the answer is "no" or the plan needs rework, the
+   run stops or replans here, with nothing to clean up.
+4. Exception: if the task contains `AUTOPILOT` AND you have zero questions,
    post the plan and continue directly. If you have any question, stop anyway.
 
 ## Phase 3 – Implementation
-1. In every repo you change (targets, and the test repo if you add test
+1. First, record the approved plan: write `deliveries/<slug>/PLAN.md` from
+   `templates/PLAN.md` — the plan as posted in the chat, with the user's
+   answers folded in and the approval log filled in. `<slug>` =
+   `YYYY-MM-DD-<component>-<short-feature-name>`, kebab-case. This is the
+   first thing the run writes to disk; it travels with the delivery and is
+   committed only in Phase 5.
+2. In every repo you change (targets, and the test repo if you add test
    cases), create a local branch `agent/<slug>` from its base commit.
    These branches are never pushed.
-2. Implement commit by commit as planned. Each commit must build on its own
+3. Implement commit by commit as planned. Each commit must build on its own
    where reasonably possible, have a focused scope, and a message that
    follows the repo's existing conventions (inspect `git log`),
    referencing spec clauses in the body.
-3. Tests are part of the work, not an afterthought:
+4. Tests are part of the work, not an afterthought:
    - Extend existing unit tests for every changed function/module with
      testable logic (encoding/decoding, scheduling decisions, state
      machines, config parsing, message builders). Put them in the commit
@@ -268,11 +282,11 @@ missing and ask the user to add them to the session (or provide URLs).
      plan and propose a minimal addition — don't add one unasked.
    - Where the test repo has test cases for related features, add or adapt
      test cases for the new behavior there (separate patch series).
-4. Follow repo style. If the repo has `.clang-format`, format changed lines
+5. Follow repo style. If the repo has `.clang-format`, format changed lines
    (`git clang-format <base>` or equivalent).
-5. Prefer extending existing structures over parallel new ones. Do not
+6. Prefer extending existing structures over parallel new ones. Do not
    refactor unrelated code.
-6. STOP and ask in the chat (then end turn, no notification) when:
+7. STOP and ask in the chat (then end turn, no notification) when:
    - The spec is ambiguous or clauses conflict, and the choice matters
    - The change requires touching shared infrastructure beyond the plan
      (schedulers core, ITTI/messaging, config framework, common libs)
@@ -621,7 +635,14 @@ Uses the latest converted version unless `--version` is given. Output stays comp
 
 - Must run inside the toolkit repo (verify `.toolkit-root` and that `origin` is the toolkit repo; refuse otherwise).
 - Creates/switches to branch `claude/delivery-<slug>`, stages `deliveries/<slug>/`, `specs/` and `specs/manifest.yaml`, commits (`delivery: <slug>`), pushes to `origin`.
-- This is the **only** sanctioned push path; the hook in §7.1 allows it.
+- One of exactly two sanctioned push paths; the hook in §7.1 allows it.
+
+### 6.4b `scripts/push_toolkit.sh [--dry-run]`
+
+- Publishes changes to the toolkit repo itself (skills, scripts, templates, profiles, docs) on the current branch, normally `main`.
+- Same location and origin guards as §6.4. Refuses: a detached HEAD, a `claude/delivery-*` branch (that is §6.4's job), any force/mirror/delete flag, and a non-fast-forward (it fetches first and tells the agent to rebase).
+- Commits nothing — the agent commits, the script only pushes. Uncommitted changes are listed as a warning so nothing half-finished is pushed silently.
+- `--dry-run` reports the branch and the commits that would go out, and changes nothing.
 
 ### 6.5 `scripts/cloud_setup.sh`
 
@@ -672,8 +693,8 @@ Verify the schema against the current Claude Code hooks documentation and adjust
 **`push_guard.py` requirements:**
 - Reads the hook JSON from stdin; inspects `tool_input.command`.
 - Blocks (exit code 2, explanation on stderr) any command that contains a `git push` (including `git -C x push`, pushes inside `&&`/`;` chains, `git push` via `sh -c`), `gh pr create`, `gh pr merge`, `gh repo`, `gh release`, or `git remote set-url`/`git remote add` targeting a push.
-- Allows commands that invoke `scripts/push_delivery.sh`.
-- Error message tells Claude: "Direct pushes are blocked. Use scripts/push_delivery.sh <slug> for delivery branches. Never push to target or test repos."
+- Allows commands that invoke `scripts/push_delivery.sh` or `scripts/push_toolkit.sh` — and only in the segment that invokes them, so a sanctioned script chained with a raw push of another repo is still blocked.
+- Error message tells Claude: "Direct pushes are blocked. Use scripts/push_delivery.sh <slug> for delivery branches, or scripts/push_toolkit.sh for changes to the toolkit repo itself. Never push to target or test repos."
 - Include a small self-test (`push_guard.py --self-test`) with allowed/blocked examples.
 
 ### 7.2 Notifications (no hook)
@@ -706,6 +727,10 @@ Mode: (default — add E2E to also run the rfsim end-to-end test in the cloud)
 ```
 
 ### 8.2 `templates/PLAN.md`
+
+Not written in Phase 2 — the Phase 2 plan is a chat message only. This template is
+filled in at the start of Phase 3, once the user has approved, as the record that
+travels with the delivery.
 
 Sections: Understanding · Repos & base commits (table: repo, role, branch, SHA) · Spec basis (table: TS, version, clause, what it mandates) · Current state in repo(s) · Design decisions · Commit plan per repo (table: #, title, files, spec refs) · Config changes · Test plan (unit tests to add/extend; tier table T0–T4 with command and CAN RUN / MAYBE / LOCAL ONLY from probe_env; testbed scripts and new test cases) · Risks & assumptions · Questions (numbered) · Approval log (date, user's answers).
 

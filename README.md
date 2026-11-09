@@ -9,7 +9,9 @@ repos full of lab scripts. Which repos belong together is described by a **profi
 
 The cloud agent **never pushes to a target repo**. It builds a *delivery package* and
 pushes that to this toolkit repo only. You apply it locally, finish the testing that needs
-real hardware, and open the PR yourself.
+real hardware, and open the PR yourself. The one other thing it may push is this toolkit
+itself — skill, script and doc fixes land on `main` here, so the next run starts from the
+corrected version.
 
 ```
 ┌────────────────────────── CLOUD (claude.ai/code) ──────────────────────────┐
@@ -43,7 +45,7 @@ real hardware, and open the PR yourself.
 | `SETUP_INSTRUCTIONS.md` | the specification this repo was built from |
 | `.toolkit-root` | empty marker; every script finds the repo by walking up to it |
 | `.claude/settings.json` | hook wiring (the push guard) |
-| `.claude/hooks/push_guard.py` | blocks every push path except `push_delivery.sh` |
+| `.claude/hooks/push_guard.py` | blocks every push path except the two scripts below |
 | `.claude/skills/implement-feature/` | the cloud workflow |
 | `.claude/skills/apply-delivery/` | the local workflow |
 | `.claude/skills/oai-ran/` | OAI RAN repo knowledge (layout, ASN.1 versions, build, tests, MBS state) |
@@ -56,7 +58,8 @@ real hardware, and open the PR yourself.
 | `scripts/ensure_specs.py` | download + convert the specs a task needs |
 | `scripts/spec_lookup.py` | search clauses, grep spec text, print ASN.1 types |
 | `scripts/make_delivery.sh` | export one patch series per repo into a delivery |
-| `scripts/push_delivery.sh` | the only sanctioned push |
+| `scripts/push_delivery.sh` | sanctioned push #1: a delivery branch of this repo |
+| `scripts/push_toolkit.sh` | sanctioned push #2: toolkit changes on `main` of this repo |
 | `scripts/probe_env.sh` | what can this VM run? (decides the test tiers) |
 | `scripts/cloud_setup.sh` | paste into the cloud environment's Setup script field |
 | `templates/` | task, plan and delivery document templates |
@@ -127,7 +130,7 @@ Start a cloud session with `5g-dev-agent` plus one target repo, and ask Claude t
 #    Expect: implement-feature, apply-delivery, oai-ran, oai-cn, open5gs-mbs
 
 # 2. The push guard works
-python3 .claude/hooks/push_guard.py --self-test        # expect "44/44 ... passed"
+python3 .claude/hooks/push_guard.py --self-test        # expect "50/50 ... passed"
 
 # 3. A real push is blocked
 git push origin main                                   # expect the hook to refuse it
@@ -173,8 +176,10 @@ What then happens:
 - **Phase 1** — recon: the spec clauses, the code, the test repo's scripts, and
   `probe_env.sh` to see what this VM can run.
 - **Phase 2** — a plan and numbered questions land in the chat, and **the agent stops.**
-  Answer from the browser or your phone and say "go". This is the point where a vague
-  task costs you a round trip, which is why the template is worth filling in.
+  The plan is a chat message and nothing else: no file, no branch, no commit until you
+  say "go", so declining costs you nothing to clean up. Answer from the browser or your
+  phone. This is the point where a vague task costs you a round trip, which is why the
+  template is worth filling in.
 - **Phase 3** — implementation, commit by commit, with unit tests as part of the work.
 - **Phase 4** — the test tiers, as far as the VM allows.
 - **Phase 5** — the delivery is pushed to `claude/delivery-<slug>` of this repo.
@@ -241,7 +246,9 @@ target repos locally.
 Open Claude Code in the target repo and run `/apply-delivery <slug>` (the slug, the branch
 name, or just paste the cloud session's final message). The skill will:
 
-1. Fetch `claude/delivery-<slug>` from this repo and summarize what is in it.
+1. Fetch `claude/delivery-<slug>` from this repo and summarize what is in it. It reads the
+   branch without switching your toolkit checkout — the `deliveries/<slug>/` folder just
+   appears in your working tree while you stay on `main`.
 2. For each repo in the delivery: find your checkout (the profile's `local_path` helps),
    check the base commit is present, create `feature/<slug>` at it, and `git am -3` the
    series. On a conflict it stops and shows you the conflict rather than forcing it.
@@ -264,6 +271,12 @@ yourself. The agent does none of those three.
   Those are set in each protocol's `MESSAGES/CMakeLists.txt` in the RAN repo and **do
   move** — re-check them when a fork bumps a grammar, and update the manifest pin to match.
   Citing a clause from a version the code doesn't implement is how wrong IE names get in.
+- **Toolkit fixes from a run:** the agent may commit and publish changes to this repo
+  itself on `main` via `scripts/push_toolkit.sh` — a wrong command in a stack skill, a
+  stale profile value, a script bug. They are separate commits from the delivery and a
+  plain `git pull` here picks them up. That is the whole point: the next run starts from
+  the corrected toolkit instead of repeating the mistake. Everything else it produces
+  still goes to a delivery branch only.
 - **Merging deliveries back:** periodically merge `claude/delivery-*` branches into `main`
   so newly converted specs land on main and the next session doesn't re-download them.
 - **Cleaning up:** delete old delivery branches and `deliveries/<slug>` folders once the
@@ -291,4 +304,4 @@ T4 always comes home.
 | `git am` fails locally | The base moved. Apply on the recorded base SHA first, then `git rebase origin/<branch>`. Applying directly onto a moved tip produces much worse conflicts. |
 | No notification arrives | Notifications are off for the account, or (for a local CLI session) Remote Control is not connected so nothing can reach the phone. The delivery branch and the chat summary are the source of truth either way. |
 | Skills not listed in the session | The session started in a target repo. Re-run the setup script, or check `~/.claude/skills/`. |
-| The agent says a push was blocked | Working as intended. Deliveries go out through `scripts/push_delivery.sh`; `gh repo` and `gh release` are blocked wholesale, so use `gh api` or `git ls-remote` for read-only lookups. |
+| The agent says a push was blocked | Working as intended. Deliveries go out through `scripts/push_delivery.sh`, toolkit changes through `scripts/push_toolkit.sh`, and nothing else pushes at all; `gh repo` and `gh release` are blocked wholesale, so use `gh api` or `git ls-remote` for read-only lookups. |

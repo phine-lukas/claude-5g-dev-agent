@@ -58,14 +58,21 @@ missing and ask the user to add them to the session (or provide URLs).
    long builds yet.
 
 ## Phase 2 – Plan and questions (MANDATORY STOP)
-1. Write the plan to `deliveries/<slug>/PLAN.md` using `templates/PLAN.md`.
-   `<slug>` = `YYYY-MM-DD-<component>-<short-feature-name>`, kebab-case.
-2. Post the plan IN THE CHAT (condensed, but complete), containing:
+This phase writes nothing to disk and commits nothing. The plan is a chat
+message, so the user can read it and decide whether the run starts at all; if
+it doesn't, no repo has been touched.
+
+1. Post the plan IN THE CHAT, complete — this is its only copy. Follow the
+   section order of `templates/PLAN.md`, kept compact (tables stay tables,
+   prose stays short):
    - Your understanding of the task in 3–5 sentences
-   - Spec basis: list of TS/clause references
-   - Current state in the repo (what exists, what's missing)
-   - Proposed commit series: one line per commit, with files touched
-   - Configuration changes (new config keys, defaults)
+   - Repos and base commits (repo, role, branch, base SHA)
+   - Spec basis: TS, version, clause, what it mandates — every row from
+     `scripts/spec_lookup.py`, never from memory
+   - Current state in the repo(s): what exists, what's missing
+   - Design decisions: for each real choice, the options and what you propose
+   - Proposed commit series per repo: one line per commit, with files touched
+   - Configuration changes (new config keys, defaults, compatibility)
    - Test plan: which unit tests you will add/extend; the test-tier table
      (tier → command → CAN RUN / MAYBE / LOCAL ONLY); which testbed scripts
      from the test repo apply locally, and whether they need changes
@@ -73,22 +80,28 @@ missing and ask the user to add them to the session (or provide URLs).
    - Risks and assumptions
    - **Numbered questions** — anything ambiguous in the task or spec,
      design choices with real trade-offs, scope boundaries
-3. Then END YOUR TURN — no notification, the plan and the questions stay in
-   the chat. Do not write code.
-4. Continue only after the user replies with approval ("go", "approved",
-   answers + "go", etc.). Incorporate answers into PLAN.md.
-5. Exception: if the task contains `AUTOPILOT` AND you have zero questions,
+2. Then END YOUR TURN — no file, no branch, no notification. Do not write code.
+3. Continue only after the user replies with approval ("go", "approved",
+   answers + "go", etc.). If the answer is "no" or the plan needs rework, the
+   run stops or replans here, with nothing to clean up.
+4. Exception: if the task contains `AUTOPILOT` AND you have zero questions,
    post the plan and continue directly. If you have any question, stop anyway.
 
 ## Phase 3 – Implementation
-1. In every repo you change (targets, and the test repo if you add test
+1. First, record the approved plan: write `deliveries/<slug>/PLAN.md` from
+   `templates/PLAN.md` — the plan as posted in the chat, with the user's
+   answers folded in and the approval log filled in. `<slug>` =
+   `YYYY-MM-DD-<component>-<short-feature-name>`, kebab-case. This is the
+   first thing the run writes to disk; it travels with the delivery and is
+   committed only in Phase 5.
+2. In every repo you change (targets, and the test repo if you add test
    cases), create a local branch `agent/<slug>` from its base commit.
    These branches are never pushed.
-2. Implement commit by commit as planned. Each commit must build on its own
+3. Implement commit by commit as planned. Each commit must build on its own
    where reasonably possible, have a focused scope, and a message that
    follows the repo's existing conventions (inspect `git log`),
    referencing spec clauses in the body.
-3. Tests are part of the work, not an afterthought:
+4. Tests are part of the work, not an afterthought:
    - Extend existing unit tests for every changed function/module with
      testable logic (encoding/decoding, scheduling decisions, state
      machines, config parsing, message builders). Put them in the commit
@@ -99,11 +112,11 @@ missing and ask the user to add them to the session (or provide URLs).
      plan and propose a minimal addition — don't add one unasked.
    - Where the test repo has test cases for related features, add or adapt
      test cases for the new behavior there (separate patch series).
-4. Follow repo style. If the repo has `.clang-format`, format changed lines
+5. Follow repo style. If the repo has `.clang-format`, format changed lines
    (`git clang-format <base>` or equivalent).
-5. Prefer extending existing structures over parallel new ones. Do not
+6. Prefer extending existing structures over parallel new ones. Do not
    refactor unrelated code.
-6. STOP and ask in the chat (then end turn, no notification) when:
+7. STOP and ask in the chat (then end turn, no notification) when:
    - The spec is ambiguous or clauses conflict, and the choice matters
    - The change requires touching shared infrastructure beyond the plan
      (schedulers core, ITTI/messaging, config framework, common libs)
@@ -185,11 +198,19 @@ reviewer sees what went wrong along the way.
 3. Verify each patch series applies cleanly on its base commit in a
    temporary worktree: `git worktree add /tmp/verify-<repo> <base-sha>` →
    `git am` → remove the worktree.
-4. `scripts/push_delivery.sh <slug>` commits the delivery folder (and any
+4. If the run improved the toolkit itself — a wrong command in a stack skill,
+   a stale profile value, a script that needed fixing, a spec added to the
+   manifest — commit that on `main` of this repo, separately from the
+   delivery and with its own message, and push it with
+   `scripts/push_toolkit.sh`. Do this BEFORE step 5, so the delivery branch
+   (cut from `main`) carries the fix. Nothing else goes to `main`: the
+   delivery folder and the patches belong on the delivery branch only.
+5. `scripts/push_delivery.sh <slug>` commits the delivery folder (and any
    newly converted specs) on branch `claude/delivery-<slug>` of this toolkit
    repo and pushes it.
-5. Post a final summary in chat: delivery path + branch, commit list, what
-   was verified, what needs local testing, open issues.
-6. Send one `PushNotification`: `<slug>: N patches ready, <branch>` — then
+6. Post a final summary in chat: delivery path + branch, commit list, what
+   was verified, what needs local testing, open issues. Mention any toolkit
+   commit pushed to `main` in step 4.
+7. Send one `PushNotification`: `<slug>: N patches ready, <branch>` — then
    end. On unrecoverable failure: still deliver what exists (marked partial),
    and notify with what went wrong instead (`<slug>: stopped, <reason>`).

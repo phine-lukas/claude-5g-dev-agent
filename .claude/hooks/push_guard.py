@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash) hook: block every push path except scripts/push_delivery.sh.
+"""PreToolUse(Bash) hook: block every push path except the toolkit's own scripts.
 
 The cloud agent works in target and test repos it must never write to remotely.
 This hook reads the hook JSON on stdin, looks at `tool_input.command`, and exits
@@ -17,10 +17,13 @@ import sys
 
 MESSAGE = (
     "Direct pushes are blocked. Use scripts/push_delivery.sh <slug> for delivery "
-    "branches. Never push to target or test repos."
+    "branches, or scripts/push_toolkit.sh for changes to the toolkit repo itself. "
+    "Never push to target or test repos."
 )
 
-ALLOWED_SCRIPT = "push_delivery.sh"
+# The only two sanctioned push paths. Both scripts refuse to run anywhere but
+# inside the toolkit repo, so neither can be pointed at a target or test repo.
+ALLOWED_SCRIPTS = ("push_delivery.sh", "push_toolkit.sh")
 
 # Wrappers that take the real command as their trailing arguments.
 WRAPPERS = {"sudo", "env", "nohup", "time", "command", "builtin", "exec", "stdbuf", "ionice", "nice"}
@@ -89,8 +92,8 @@ def check_segment(tokens: list[str], depth: int = 0) -> str | None:
         return None
     cmd, args = basename(tokens[0]), tokens[1:]
 
-    if any(ALLOWED_SCRIPT in t for t in tokens):
-        return None  # the one sanctioned push path
+    if any(script in t for t in tokens for script in ALLOWED_SCRIPTS):
+        return None  # a sanctioned push path
 
     if cmd in SHELLS and depth < 4:
         for i, tok in enumerate(args):
@@ -168,7 +171,7 @@ def check_command(command: str, depth: int = 0) -> str | None:
             return reason
 
     # Belt and braces: catch pushes inside $(...), backticks, or unparseable quoting.
-    if ALLOWED_SCRIPT not in command:
+    if not any(script in command for script in ALLOWED_SCRIPTS):
         for pattern in RAW_PATTERNS:
             if pattern.search(command):
                 return f"This command contains a blocked push/remote operation (/{pattern.pattern}/)."
@@ -199,10 +202,17 @@ CASES: list[tuple[str, bool]] = [
     ("git send-email --to a@b patches/0001.patch", True),
     ("git config remote.origin.url https://x/y.git", True),
     ("git -C /src config remote.origin.pushurl git@h:a/b.git", True),
+    # A sanctioned script in one segment never excuses a raw push in another.
+    ("scripts/push_delivery.sh my-slug && git push origin main", True),
+    ("scripts/push_toolkit.sh && git -C /src/oai push", True),
+    ("scripts/push_toolkit.sh --dry-run; gh pr create -t x -b y", True),
     # Allowed
     ("scripts/push_delivery.sh 2026-11-05-gnb-mcch", False),
     ("bash scripts/push_delivery.sh 2026-11-05-gnb-mcch", False),
     ("./scripts/push_delivery.sh my-slug && echo done", False),
+    ("scripts/push_toolkit.sh", False),
+    ("bash scripts/push_toolkit.sh --dry-run", False),
+    ("./scripts/push_toolkit.sh && echo pushed", False),
     ("git status", False),
     ("git log --oneline develop..HEAD", False),
     ("git format-patch --base=abc123 -o out/ abc123..HEAD", False),

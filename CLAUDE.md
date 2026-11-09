@@ -9,8 +9,16 @@ base branches, build commands and test tiers belong together.
 
 ## Hard rules
 1. NEVER run `git push` directly. NEVER push to any target or test repo.
-   The only allowed push is `scripts/push_delivery.sh`, which pushes this
-   toolkit repo's delivery branch. A hook enforces this.
+   Exactly two pushes are sanctioned, and both only ever touch THIS toolkit
+   repo (a hook enforces it):
+   - `scripts/push_delivery.sh <slug>` — the delivery branch
+     `claude/delivery-<slug>`.
+   - `scripts/push_toolkit.sh` — the current branch (normally `main`) with
+     changes to the toolkit itself: skills, scripts, templates, profiles,
+     specs, docs. Commit first, the script only pushes, never force, never
+     non-fast-forward. Fix the toolkit where it was wrong rather than
+     working around it, keep those commits separate from delivery work,
+     and push them before the delivery so the delivery branch carries them.
 2. NEVER open PRs/MRs, create releases, or modify remote branches of other repos.
 3. Test repos may contain lab IPs, hostnames or credentials: never copy
    them into deliveries, logs or chat beyond what is needed; never try to

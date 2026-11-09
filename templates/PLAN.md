@@ -2,8 +2,10 @@
 
 Date: <DATE> · Profile: <profile or "none"> · Mode: <default | AUTOPILOT | E2E[:min]>
 
-Written in Phase 2 of /implement-feature. The chat message is the condensed
-version of this file; this file is the record that travels with the delivery.
+Written at the start of Phase 3 of /implement-feature, i.e. only after the
+user approved the plan. In Phase 2 the plan exists as a chat message and
+nothing else — this file is the approved version, with the answers folded in,
+and it is the record that travels with the delivery.
 
 ---
 

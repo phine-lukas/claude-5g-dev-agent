@@ -5,14 +5,24 @@ description: Apply a delivery package produced by the implement-feature workflow
 
 # Apply Delivery (local workflow)
 
-Never push. Never open PRs. The user does that manually.
+Never push a target or test repo, never open PRs — the user does that
+manually. The one exception is the toolkit repo itself: if the user asks for
+a toolkit fix to be published, commit it on `main` and use
+`scripts/push_toolkit.sh`.
 
 ## 1. Locate the delivery
 1. Find the toolkit repo: `$DEV_AGENT_HOME`, else `~/5g-dev-agent`, else ask.
-2. In the toolkit repo: `git fetch origin` and check out or read
-   `claude/delivery-<slug>` (the user gives the slug, the branch name, or
-   pasted cloud output from which you extract it). Read `README.md`,
-   `CHANGES.md`, `OPEN_ISSUES.md`, `APPLY.md` of the delivery.
+2. Fetch the delivery branch and read it WITHOUT switching the user's
+   checkout — their toolkit stays on `main`:
+   ```bash
+   git fetch origin claude/delivery-<slug>
+   git checkout FETCH_HEAD -- deliveries/<slug>   # files land in the worktree
+   ```
+   The slug comes from the user, the branch name, or pasted cloud output.
+   To drop the files again afterwards:
+   `git restore --staged --worktree -- deliveries/<slug> && rm -rf deliveries/<slug>`.
+   Only switch to the delivery branch if the user asks for it.
+   Read `README.md`, `CHANGES.md`, `OPEN_ISSUES.md`, `APPLY.md` of the delivery.
 3. Summarize to the user in a few lines: what it does, number of patches,
    base commit, open issues. Ask before proceeding if open issues look
    blocking.
@@ -50,7 +60,8 @@ logs, check the expected log lines/messages, and report pass/fail per step.
 - Keep a running list of fixes.
 
 ## 6. Wrap up
-1. Update the delivery's `PR_DESCRIPTION.md` locally (do not push the toolkit
-   repo unless asked) with test results and fixes.
+1. Update the delivery's `PR_DESCRIPTION.md` locally with test results and
+   fixes (push the toolkit repo only if the user asks, and then only with
+   `scripts/push_toolkit.sh`).
 2. Tell the user the branch is ready, show `git log --oneline <base>..HEAD`,
    and remind them to squash fixups, push, and open the PR themselves.

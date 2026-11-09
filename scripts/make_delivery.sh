@@ -6,7 +6,7 @@
 # For each repo it runs `git format-patch --base=<base-sha> <base-sha>..HEAD` into
 #   deliveries/<slug>/patches/<repo-name>/
 # and copies the delivery doc templates (never overwriting files that already
-# exist, so a PLAN.md written in Phase 2 survives).
+# exist, so the PLAN.md written at the start of Phase 3 survives).
 #
 # Fails if a repo has uncommitted changes or no commits above its base.
 
