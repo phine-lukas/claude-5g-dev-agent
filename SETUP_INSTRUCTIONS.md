@@ -34,7 +34,7 @@ Rules while building:
 │ /implement-feature [profile] <task>                                        │
 │   Phase 0  ensure specs (fetch + convert missing ones)                     │
 │   Phase 1  recon: specs, code, test repo, probe VM capabilities            │
-│   Phase 2  PLAN + QUESTIONS in chat  ──► STOP, notify, wait for "go"       │
+│   Phase 2  PLAN + QUESTIONS in chat  ──► STOP, wait for "go"               │
 │   Phase 3  implement + extend unit tests (stop + ask if blocked)           │
 │   Phase 4  test tiers: build → unit → integration/robot/docker → as far    │
 │            as the VM allows; the rest documented for local testing         │
@@ -64,8 +64,7 @@ Rules while building:
 ├── .claude/
 │   ├── settings.json                 # §7 – hooks
 │   ├── hooks/
-│   │   ├── push_guard.py             # §7.1
-│   │   └── notify.sh                 # §7.2
+│   │   └── push_guard.py             # §7.1
 │   └── skills/
 │       ├── implement-feature/
 │       │   └── SKILL.md              # §4.1
@@ -90,9 +89,8 @@ Rules while building:
 │   ├── spec_lookup.py                # §6.2
 │   ├── make_delivery.sh              # §6.3
 │   ├── push_delivery.sh              # §6.4
-│   ├── set_status.sh                 # §6.5
-│   ├── cloud_setup.sh                # §6.6 – pasted into cloud environment
-│   └── probe_env.sh                  # §6.7 – what can this VM run?
+│   ├── cloud_setup.sh                # §6.5 – pasted into cloud environment
+│   └── probe_env.sh                  # §6.6 – what can this VM run?
 ├── templates/
 │   ├── TASK_TEMPLATE.md              # §8.1 – how to write a task
 │   ├── PLAN.md                       # §8.2
@@ -115,7 +113,6 @@ specs/**/raw/
 *.docx
 *.doc
 __pycache__/
-.agent-status
 ```
 
 ---
@@ -146,8 +143,10 @@ base branches, build commands and test tiers belong together.
    tests of the target repo wherever a framework exists.
 6. Spec claims must cite TS number, version and clause. If you cannot find
    the clause, say so; do not paraphrase from memory.
-7. Before ending ANY turn, set the status line with `scripts/set_status.sh`
-   (it drives notifications).
+7. Notify only when a run is over: once the delivery is pushed, or once you
+   stop for good, send ONE `PushNotification` (one line, e.g. "mbs-mcch:
+   delivery pushed, 6 patches" / "mbs-mcch: stopped, build broken"). No
+   notification for plans, questions or progress — those are chat only.
 
 ## Locating things
 - Toolkit root: the directory containing `.toolkit-root`.
@@ -176,8 +175,8 @@ description: Implement a 3GPP feature or change in a 5G software repository (Ope
 # Implement Feature (cloud workflow)
 
 You work in phases. Never skip Phase 2. Never push to target or test repos.
-Before ending ANY turn: `scripts/set_status.sh <STATE> "<short message>"`
-States: PLAN_READY, QUESTION, BLOCKED, DELIVERED, FAILED.
+Notifications: one `PushNotification` when the run is over (delivered, or
+stopped for good) — never for plans, questions or progress.
 
 ## Inputs
 The user message (ideally following `templates/TASK_TEMPLATE.md`). Identify:
@@ -243,8 +242,8 @@ missing and ask the user to add them to the session (or provide URLs).
    - Risks and assumptions
    - **Numbered questions** — anything ambiguous in the task or spec,
      design choices with real trade-offs, scope boundaries
-3. Then `scripts/set_status.sh PLAN_READY "<slug>: plan ready, N questions"`
-   (or QUESTION if questions exist) and END YOUR TURN. Do not write code.
+3. Then END YOUR TURN — no notification, the plan and the questions stay in
+   the chat. Do not write code.
 4. Continue only after the user replies with approval ("go", "approved",
    answers + "go", etc.). Incorporate answers into PLAN.md.
 5. Exception: if the task contains `AUTOPILOT` AND you have zero questions,
@@ -273,7 +272,7 @@ missing and ask the user to add them to the session (or provide URLs).
    (`git clang-format <base>` or equivalent).
 5. Prefer extending existing structures over parallel new ones. Do not
    refactor unrelated code.
-6. STOP and ask (status QUESTION or BLOCKED, then end turn) when:
+6. STOP and ask in the chat (then end turn, no notification) when:
    - The spec is ambiguous or clauses conflict, and the choice matters
    - The change requires touching shared infrastructure beyond the plan
      (schedulers core, ITTI/messaging, config framework, common libs)
@@ -360,9 +359,9 @@ reviewer sees what went wrong along the way.
    repo and pushes it.
 5. Post a final summary in chat: delivery path + branch, commit list, what
    was verified, what needs local testing, open issues.
-6. `scripts/set_status.sh DELIVERED "<slug>: N patches ready"` and end.
-   On unrecoverable failure: still deliver what exists (marked partial) and
-   use FAILED.
+6. Send one `PushNotification`: `<slug>: N patches ready, <branch>` — then
+   end. On unrecoverable failure: still deliver what exists (marked partial),
+   and notify with what went wrong instead (`<slug>: stopped, <reason>`).
 ````
 
 ### 4.2 `.claude/skills/apply-delivery/SKILL.md` (full content)
@@ -624,11 +623,7 @@ Uses the latest converted version unless `--version` is given. Output stays comp
 - Creates/switches to branch `claude/delivery-<slug>`, stages `deliveries/<slug>/`, `specs/` and `specs/manifest.yaml`, commits (`delivery: <slug>`), pushes to `origin`.
 - This is the **only** sanctioned push path; the hook in §7.1 allows it.
 
-### 6.5 `scripts/set_status.sh <STATE> "<message>"`
-
-- Writes `<STATE>|<message>|<ISO timestamp>` to `<toolkit-root>/.agent-status` (gitignored). Used by the notification hook.
-
-### 6.6 `scripts/cloud_setup.sh`
+### 6.5 `scripts/cloud_setup.sh`
 
 This script's content is pasted into the cloud environment's **Setup script** field (see README). Requirements:
 
@@ -639,7 +634,7 @@ This script's content is pasted into the cloud environment's **Setup script** fi
 - If Docker is present, pre-pull base images listed in the profiles' T3 notes only if they are public and small enough to be worth caching; otherwise skip.
 - Print a short summary of what was installed.
 
-### 6.7 `scripts/probe_env.sh`
+### 6.6 `scripts/probe_env.sh`
 
 Prints a compact capability report (also as JSON with `--json`) used to decide which test tiers can run:
 
@@ -647,7 +642,7 @@ Prints a compact capability report (also as JSON with `--json`) used to decide w
 - Whether running as root / passwordless sudo is available.
 - Docker: client present, daemon reachable (`docker info`), compose plugin, ability to run a container (`docker run --rm hello-world` or an already cached tiny image), privileged mode (`--privileged` test), host networking.
 - Kernel features relevant to 5G stacks: `/dev/net/tun` usable, SCTP available (`modprobe sctp` / `checksctp` or creating an SCTP socket in Python), ability to create network namespaces, sysctl writes (ip_forward).
-- Network reachability: github.com, www.3gpp.org, docker registry, ntfy.sh (short timeouts).
+- Network reachability: github.com, www.3gpp.org, docker registry (short timeouts).
 - Tools: cmake, ninja, meson, gcc/clang versions, python3, robot (Robot Framework).
 - Ends with a suggested tier verdict (T0–T3: CAN RUN / MAYBE / NO) with one-line reasons.
 
@@ -667,20 +662,6 @@ Prints a compact capability report (also as JSON with `--json`) used to decide w
           { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/push_guard.py\"" }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/notify.sh\" stop" }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/notify.sh\" notification" }
-        ]
-      }
     ]
   }
 }
@@ -695,13 +676,10 @@ Verify the schema against the current Claude Code hooks documentation and adjust
 - Error message tells Claude: "Direct pushes are blocked. Use scripts/push_delivery.sh <slug> for delivery branches. Never push to target or test repos."
 - Include a small self-test (`push_guard.py --self-test`) with allowed/blocked examples.
 
-### 7.2 `.claude/hooks/notify.sh`
+### 7.2 Notifications (no hook)
 
-- Argument: `stop` or `notification`.
-- If `NTFY_TOPIC` is unset → exit 0 silently (notifications optional).
-- Read `.agent-status` if present. For `stop`: send only if the status changed since the last notification (store last-sent hash in `/tmp`), so every turn doesn't ping. For `notification`: always send ("Claude is waiting for input").
-- Send via `curl -s -m 10 -H "Title: 5g-dev-agent <STATE>" -d "<message>" "${NTFY_SERVER:-https://ntfy.sh}/$NTFY_TOPIC"`; add a `Priority: high` header for QUESTION, BLOCKED and FAILED.
-- Never fail the session: always exit 0.
+- There is no notifier hook and no status file. The agent itself sends one `PushNotification` at the end of a run — Claude's own channel, so it lands in the Claude app and as a desktop notification, with no third-party service and nothing to configure.
+- Exactly two occasions: delivery pushed (`<slug>: N patches ready, <branch>`) and stopped for good (`<slug>: stopped, <reason>`). Plans, questions and progress are chat-only — Phase 2's stop is announced by the session's own "finished" notification.
 
 ---
 
@@ -760,11 +738,11 @@ Write a clear, practical README in English with these sections. Use the user-fac
    - Sign in at claude.ai/code, connect GitHub (install the Claude GitHub App, or from the CLI run `/web-setup`). Grant access to `5g-dev-agent` and every repo you'll work on, including private forks and testbed repos.
    - If a private repo needs credentials for submodules or private dependencies, note how to handle that (no secrets in environment variables; prefer making the dependency accessible to the GitHub account).
    - Create a cloud environment named e.g. `oai-dev`:
-     - **Network access:** must reach `www.3gpp.org` (spec downloads), package mirrors, GitHub, and `ntfy.sh` if notifications are used. If the default/trusted level blocks 3gpp.org, use a custom allowlist or full access.
-     - **Environment variables:** `NTFY_TOPIC=<long-random-topic>` (optional). Note: values are visible to anyone who can edit the environment; there is no secret store. Don't put tokens here.
+     - **Network access:** must reach `www.3gpp.org` (spec downloads), package mirrors and GitHub. If the default/trusted level blocks 3gpp.org, use a custom allowlist or full access.
+     - **Environment variables:** none needed. Note: values are visible to anyone who can edit the environment; there is no secret store. Don't put tokens here.
      - **Setup script:** paste the contents of `scripts/cloud_setup.sh`. It is cached between sessions; after changing it, expect the next session to rebuild.
-5. **Notifications** — install the ntfy app (iOS/Android/desktop), subscribe to the topic. Explain the states (PLAN_READY, QUESTION, BLOCKED, DELIVERED, FAILED). Mention the Claude app's own notifications as an alternative, and that you can always check the session manually.
-6. **First-run verification checklist** — start a cloud session with `5g-dev-agent` + a target repo and ask Claude to run: `/implement-feature` is listed? (`/skills` or ask "which skills do you have?"); `python3 .claude/hooks/push_guard.py --self-test`; `scripts/set_status.sh QUESTION "test"` then end turn → notification arrives?; `python3 scripts/ensure_specs.py --spec 38.321 --dry-run` resolves a version?; a test `git push` is blocked. If skills/hooks aren't picked up because the session starts in the target repo, explain the setup-script fallback (§6.6).
+5. **Notifications** — nothing to install or configure: the agent sends one notification through Claude when a run ends (delivered / stopped), which reaches the Claude app and the desktop. Say that plans and questions deliberately do not notify, and that you can always check the session manually.
+6. **First-run verification checklist** — start a cloud session with `5g-dev-agent` + a target repo and ask Claude to run: `/implement-feature` is listed? (`/skills` or ask "which skills do you have?"); `python3 .claude/hooks/push_guard.py --self-test`; `python3 scripts/ensure_specs.py --spec 38.321 --dry-run` resolves a version?; a test `git push` is blocked. If skills/hooks aren't picked up because the session starts in the target repo, explain the setup-script fallback (§6.5).
 7. **Profiles** — what a profile is, the two shipped profiles, how to create one for a new project (copy, fill repos/branches/test tiers), and that task text overrides profile values.
 8. **Running a task in the cloud** — select repos (`5g-dev-agent` + target repo(s) + test repo(s)), select environment, paste a task based on `templates/TASK_TEMPLATE.md` starting with `/implement-feature`. Describe what happens: spec check → recon + environment probe → plan + questions → you answer in the chat (from browser or mobile) → implementation with tests → test tiers as far as the VM allows → delivery pushed to `claude/delivery-<slug>`. Mention plan mode as an extra safety option. Mention multiple tasks can run in parallel.
 9. **What gets tested where** — explain tiers T0–T4, that the agent extends unit tests and adds test cases to the test repo, that T3 is opt-in (add `E2E` or `E2E:<minutes>` to the task, or say so when approving the plan) because it is long, and when enabled depends on the cloud VM (docker, TUN, SCTP, resources) and is time-boxed, and that T4 (testbed, hardware) is always local. Show how to read the tier table in TESTING.md.
@@ -779,7 +757,7 @@ Write a clear, practical README in English with these sections. Use the user-fac
    Optionally also the push guard in `~/.claude/settings.json` for local sessions.
 11. **Applying a delivery locally** — open Claude Code in the target repo (the skill also finds the other repos of the delivery via the profile's `local_path`), `/apply-delivery <slug>`; describe the flow; then squash fixups, push, open the PR manually.
 12. **Maintaining the toolkit** — adding specs (manifest entry + `ensure_specs.py`), merging delivery branches back to `main` periodically (so newly converted specs land on main), cleaning old deliveries, adding new skills, updating stack skills and profiles when repos change.
-13. **Limitations & troubleshooting** — cloud VM never runs RF/hardware/testbed tests; T3 docker setups may fail for lack of privileges, TUN/SCTP or resources (check `probe_env.sh` output); long builds; network policy blocking 3gpp.org; patches not applying because the base moved (rebase instructions); notifications not arriving (topic, network allowlist, `.agent-status` not written).
+13. **Limitations & troubleshooting** — cloud VM never runs RF/hardware/testbed tests; T3 docker setups may fail for lack of privileges, TUN/SCTP or resources (check `probe_env.sh` output); long builds; network policy blocking 3gpp.org; patches not applying because the base moved (rebase instructions); notifications not arriving (notifications off for the account, or Remote Control not connected for a local session).
 
 ---
 
@@ -794,7 +772,7 @@ Report each item as ✅/❌ with details:
 5. `ensure_specs.py --spec 38.331` extracts ASN.1 into `asn1/38.331.asn` (if run; this one is large — ask first).
 6. `make_delivery.sh` tested against two throwaway git repos (2 commits each) in one call; both patch series land in `patches/<repo-name>/` and apply with `git am` on their bases.
 7. `push_delivery.sh` refuses to run outside the toolkit repo (test with a throwaway repo; do not actually push unless the user agrees).
-8. `notify.sh` exits 0 with `NTFY_TOPIC` unset; with a test topic, sends one message (ask the user first).
+8. No notifier hook or status file exists; the only notification path is the agent's own `PushNotification` at the end of a run.
 9. `oai-ran`, `oai-cn` and `open5gs-mbs` skills written from real repo inspection, or `TODO(verify)` markers listed.
 10. `probe_env.sh` runs locally and prints a tier verdict; `--json` output parses.
 11. Both profiles exist and validate; the `TODO` values of `mbs-testbed.yaml` are listed for the user to fill in (repo URLs, branches, testbed script entry points).

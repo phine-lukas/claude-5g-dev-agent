@@ -8,7 +8,6 @@
 #   - the distro package mirrors (tick "default list of common package managers")
 #   - www.3gpp.org        (spec downloads)
 #   - github.com          (repos)
-#   - ntfy.sh             (only if notifications are used)
 # Development also pulls from gitlab.eurecom.fr (OAI RAN) and the Docker registry.
 #
 # Rules this script obeys:
@@ -30,7 +29,7 @@ MISSING=""
 # pandoc            spec conversion (ensure_specs.py)
 # python3-yaml      manifest + profile parsing
 # python3-requests  spec downloads (urllib fallback exists, but requests retries better)
-# jq, curl          scripts and notifications
+# jq, curl          scripts and downloads
 # clang-format      formatting changed lines in the C/C++ repos
 CORE_PKGS="pandoc python3-yaml python3-requests jq curl clang-format git"
 # Only needed for the handful of specs still published as legacy .doc.
@@ -97,20 +96,6 @@ if [ -n "$TOOLKIT" ]; then
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "python3 \"$HOME_DIR/.claude/hooks/push_guard.py\"" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "bash \"$HOME_DIR/.claude/hooks/notify.sh\" stop" }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          { "type": "command", "command": "bash \"$HOME_DIR/.claude/hooks/notify.sh\" notification" }
         ]
       }
     ]

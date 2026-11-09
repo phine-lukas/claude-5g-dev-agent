@@ -19,7 +19,7 @@ real hardware, and open the PR yourself.
 │ /implement-feature [profile] <task>                                        │
 │   Phase 0  ensure specs (fetch + convert missing ones)                     │
 │   Phase 1  recon: specs, code, test repo, probe VM capabilities            │
-│   Phase 2  PLAN + QUESTIONS in chat  ──► STOP, notify, wait for "go"       │
+│   Phase 2  PLAN + QUESTIONS in chat  ──► STOP, wait for "go"               │
 │   Phase 3  implement + extend unit tests (stop + ask if blocked)           │
 │   Phase 4  test tiers: build → unit → integration/robot/docker → as far    │
 │            as the VM allows; the rest documented for local testing         │
@@ -42,9 +42,8 @@ real hardware, and open the PR yourself.
 | `CLAUDE.md` | always-loaded working rules — the hard "never push" rules live here |
 | `SETUP_INSTRUCTIONS.md` | the specification this repo was built from |
 | `.toolkit-root` | empty marker; every script finds the repo by walking up to it |
-| `.claude/settings.json` | hook wiring (push guard, notifications) |
+| `.claude/settings.json` | hook wiring (the push guard) |
 | `.claude/hooks/push_guard.py` | blocks every push path except `push_delivery.sh` |
-| `.claude/hooks/notify.sh` | sends the status line to ntfy |
 | `.claude/skills/implement-feature/` | the cloud workflow |
 | `.claude/skills/apply-delivery/` | the local workflow |
 | `.claude/skills/oai-ran/` | OAI RAN repo knowledge (layout, ASN.1 versions, build, tests, MBS state) |
@@ -58,7 +57,6 @@ real hardware, and open the PR yourself.
 | `scripts/spec_lookup.py` | search clauses, grep spec text, print ASN.1 types |
 | `scripts/make_delivery.sh` | export one patch series per repo into a delivery |
 | `scripts/push_delivery.sh` | the only sanctioned push |
-| `scripts/set_status.sh` | write the status line that drives notifications |
 | `scripts/probe_env.sh` | what can this VM run? (decides the test tiers) |
 | `scripts/cloud_setup.sh` | paste into the cloud environment's Setup script field |
 | `templates/` | task, plan and delivery document templates |
@@ -89,13 +87,13 @@ This repo contains no OAI source of its own — only patches against it, inside 
 3. **Create an environment**, e.g. `oai-dev`:
 
    - **Network access.** It must reach `www.3gpp.org` (spec downloads), the package
-     mirrors, `github.com`, and `ntfy.sh` if you use notifications. Development also pulls
-     from `gitlab.eurecom.fr` (OAI RAN) and the Docker registry. If the default or trusted
-     level blocks 3gpp.org, switch to a custom allowlist (tick "also include default list
-     of common package managers") or full access.
+     mirrors and `github.com`. Development also pulls from `gitlab.eurecom.fr` (OAI RAN)
+     and the Docker registry. If the default or trusted level blocks 3gpp.org, switch to a
+     custom allowlist (tick "also include default list of common package managers") or
+     full access.
 
-   - **Environment variables.** `NTFY_TOPIC=<a long random string>` (optional).
-     Optionally `NTFY_SERVER` for a self-hosted ntfy. Nothing secret belongs here.
+   - **Environment variables.** None are needed any more. Nothing secret belongs here
+     in any case: anyone who can edit the environment can read what is in it.
 
    - **Setup script.** Paste the contents of [`scripts/cloud_setup.sh`](scripts/cloud_setup.sh).
      It installs pandoc, PyYAML, requests, jq, clang-format and (if available) LibreOffice,
@@ -105,23 +103,20 @@ This repo contains no OAI source of its own — only patches against it, inside 
 
 ## Notifications
 
-The agent writes a status line at the end of every turn, and a hook forwards it to
-[ntfy](https://ntfy.sh). Install the ntfy app (iOS / Android / desktop) and subscribe to
-your topic. Anyone who knows the topic can read it — use something long and random.
+No separate notifier app, no status files. When a run is over the agent sends a single
+notification through Claude itself — the Claude app on your phone and a desktop
+notification in the terminal — saying what came out of it:
 
-| State | Meaning |
-|---|---|
-| `PLAN_READY` | the plan is posted and waiting for your "go" |
-| `QUESTION` | the agent needs an answer before it can continue |
-| `BLOCKED` | something it cannot resolve (no network, missing access, a dependency) |
-| `DELIVERED` | a delivery package is pushed and ready to apply |
-| `FAILED` | it stopped without a complete delivery; a partial one may still exist |
+- `<slug>: N patches ready, claude/delivery-<slug>` — the delivery is pushed
+- `<slug>: stopped, <reason>` — it gave up; a partial delivery may still exist
 
-`QUESTION`, `BLOCKED`, `FAILED` and "waiting for input" are sent with `Priority: high`.
-Identical consecutive statuses are only sent once, so a long run doesn't buzz every turn.
+That is the whole set. Plans, questions and progress stay in the chat and do not buzz:
+when the agent stops in Phase 2 for your "go", the cloud session's own "finished"
+notification from the Claude app is what tells you to look.
 
-Notifications are optional — with `NTFY_TOPIC` unset the hook exits silently. The Claude
-app's own notifications work too, and you can always just open the session.
+Phone delivery needs the Claude app signed in to the same account; for a local CLI
+session it also needs Remote Control connected, otherwise the notification only shows up
+on the desktop.
 
 ## First-run verification checklist
 
@@ -137,13 +132,10 @@ python3 .claude/hooks/push_guard.py --self-test        # expect "44/44 ... passe
 # 3. A real push is blocked
 git push origin main                                   # expect the hook to refuse it
 
-# 4. Notifications arrive
-scripts/set_status.sh QUESTION "first-run test"        # then end the turn
-
-# 5. Spec download works through the environment's network policy
+# 4. Spec download works through the environment's network policy
 python3 scripts/ensure_specs.py --spec 38.321 --dry-run   # expect a resolved version
 
-# 6. What can this VM do?
+# 5. What can this VM do?
 scripts/probe_env.sh                                   # read the tier verdict at the end
 ```
 
@@ -297,6 +289,6 @@ T4 always comes home.
 | T3 runs but proves nothing | Containers were built from public images instead of your branch. Rebuild the images from the agent branch first; Docker layer caching will otherwise serve a stale binary. |
 | The build takes forever | A cold OAI RAN build is 20–40 minutes. Keep `build/` between fix cycles — ASN.1 regeneration alone is minutes. |
 | `git am` fails locally | The base moved. Apply on the recorded base SHA first, then `git rebase origin/<branch>`. Applying directly onto a moved tip produces much worse conflicts. |
-| No notification arrives | `NTFY_TOPIC` unset, `ntfy.sh` not in the network allowlist, or the agent never called `set_status.sh` (check `.agent-status` in the toolkit root). |
+| No notification arrives | Notifications are off for the account, or (for a local CLI session) Remote Control is not connected so nothing can reach the phone. The delivery branch and the chat summary are the source of truth either way. |
 | Skills not listed in the session | The session started in a target repo. Re-run the setup script, or check `~/.claude/skills/`. |
 | The agent says a push was blocked | Working as intended. Deliveries go out through `scripts/push_delivery.sh`; `gh repo` and `gh release` are blocked wholesale, so use `gh api` or `git ls-remote` for read-only lookups. |

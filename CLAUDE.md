@@ -21,8 +21,10 @@ base branches, build commands and test tiers belong together.
    tests of the target repo wherever a framework exists.
 6. Spec claims must cite TS number, version and clause. If you cannot find
    the clause, say so; do not paraphrase from memory.
-7. Before ending ANY turn, set the status line with `scripts/set_status.sh`
-   (it drives notifications).
+7. Notify only when a run is over: once the delivery is pushed, or once you
+   stop for good, send ONE `PushNotification` (one line, e.g. "mbs-mcch:
+   delivery pushed, 6 patches" / "mbs-mcch: stopped, build broken"). No
+   notification for plans, questions or progress — those are chat only.
 
 ## Locating things
 - Toolkit root: the directory containing `.toolkit-root`.

@@ -9,8 +9,6 @@ specs/**/raw/
 __pycache__/
 *.pyc
 
-# Agent status line (drives notifications; per-session state)
-.agent-status
 
 # Scratch space used by the spec converter
 build-tmp/

@@ -97,7 +97,6 @@ reach() { if timeout 8 curl -sS -o /dev/null -m 7 "$1" >/dev/null 2>&1; then ech
 put net_github "$(reach https://github.com)"
 put net_3gpp "$(reach https://www.3gpp.org/ftp/Specs/archive/)"
 put net_docker_registry "$(reach https://registry-1.docker.io/v2/)"
-put net_ntfy "$(reach https://ntfy.sh)"
 put net_gitlab_eurecom "$(reach https://gitlab.eurecom.fr)"
 
 # ------------------------------------------------------------------ tools ----
@@ -211,7 +210,6 @@ section "Network"
 row github.com "${R[net_github]}"
 row www.3gpp.org "${R[net_3gpp]}"
 row "docker registry" "${R[net_docker_registry]}"
-row ntfy.sh "${R[net_ntfy]}"
 row gitlab.eurecom.fr "${R[net_gitlab_eurecom]}"
 
 section "Tools"

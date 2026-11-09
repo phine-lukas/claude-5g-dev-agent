@@ -6,8 +6,8 @@ description: Implement a 3GPP feature or change in a 5G software repository (Ope
 # Implement Feature (cloud workflow)
 
 You work in phases. Never skip Phase 2. Never push to target or test repos.
-Before ending ANY turn: `scripts/set_status.sh <STATE> "<short message>"`
-States: PLAN_READY, QUESTION, BLOCKED, DELIVERED, FAILED.
+Notifications: one `PushNotification` when the run is over (delivered, or
+stopped for good) — never for plans, questions or progress.
 
 ## Inputs
 The user message (ideally following `templates/TASK_TEMPLATE.md`). Identify:
@@ -73,8 +73,8 @@ missing and ask the user to add them to the session (or provide URLs).
    - Risks and assumptions
    - **Numbered questions** — anything ambiguous in the task or spec,
      design choices with real trade-offs, scope boundaries
-3. Then `scripts/set_status.sh PLAN_READY "<slug>: plan ready, N questions"`
-   (or QUESTION if questions exist) and END YOUR TURN. Do not write code.
+3. Then END YOUR TURN — no notification, the plan and the questions stay in
+   the chat. Do not write code.
 4. Continue only after the user replies with approval ("go", "approved",
    answers + "go", etc.). Incorporate answers into PLAN.md.
 5. Exception: if the task contains `AUTOPILOT` AND you have zero questions,
@@ -103,7 +103,7 @@ missing and ask the user to add them to the session (or provide URLs).
    (`git clang-format <base>` or equivalent).
 5. Prefer extending existing structures over parallel new ones. Do not
    refactor unrelated code.
-6. STOP and ask (status QUESTION or BLOCKED, then end turn) when:
+6. STOP and ask in the chat (then end turn, no notification) when:
    - The spec is ambiguous or clauses conflict, and the choice matters
    - The change requires touching shared infrastructure beyond the plan
      (schedulers core, ITTI/messaging, config framework, common libs)
@@ -190,6 +190,6 @@ reviewer sees what went wrong along the way.
    repo and pushes it.
 5. Post a final summary in chat: delivery path + branch, commit list, what
    was verified, what needs local testing, open issues.
-6. `scripts/set_status.sh DELIVERED "<slug>: N patches ready"` and end.
-   On unrecoverable failure: still deliver what exists (marked partial) and
-   use FAILED.
+6. Send one `PushNotification`: `<slug>: N patches ready, <branch>` — then
+   end. On unrecoverable failure: still deliver what exists (marked partial),
+   and notify with what went wrong instead (`<slug>: stopped, <reason>`).
