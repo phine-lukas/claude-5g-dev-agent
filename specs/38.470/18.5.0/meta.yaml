@@ -1,0 +1,12 @@
+id: '38.470'
+title: (not in manifest)
+official_title: NG-RAN; F1 general aspects and principles
+version: 18.5.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.470/38470-i50.zip
+archive: 38470-i50.zip
+sha256: e9dd2ce86706505bb98d728f5daf149dde5070aa8579d18456bb9377cac402be
+converted: '2026-11-10'
+documents: 1
+clause_files: 9
+asn1_blocks: 0

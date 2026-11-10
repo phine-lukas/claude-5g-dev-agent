@@ -1,0 +1,12 @@
+id: '23.502'
+title: 5GS procedures
+official_title: ''
+version: 18.14.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/23_series/23.502/23502-ie0.zip
+archive: 23502-ie0.zip
+sha256: 0f24045c49ddf710fb91e51ec74d070cfd13d1e9bafc07809d7e87eae6a61ce8
+converted: '2026-11-10'
+documents: 1
+clause_files: 131
+asn1_blocks: 0

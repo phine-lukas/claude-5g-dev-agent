@@ -1,0 +1,12 @@
+id: '38.473'
+title: F1AP
+official_title: NG-RAN; F1 application protocol (F1AP)
+version: 16.21.0
+release: 16
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.473/38473-gl0.zip
+archive: 38473-gl0.zip
+sha256: 2dcd931dded6a896d87c7ff4c7a015c4c4155a8fabdad33632c4cc58e4ef30b7
+converted: '2026-11-10'
+documents: 1
+clause_files: 266
+asn1_blocks: 6

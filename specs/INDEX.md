@@ -5,5 +5,17 @@ Search with `scripts/spec_lookup.py`; cite as `TS <id> V<version> clause <n>`.
 
 | TS | Version | Title | ASN.1 | Converted | Contents |
 |---|---|---|---|---|---|
+| 23.502 | V18.14.0 | 5GS procedures | — | 2026-11-10 | [toc](23.502/18.14.0/toc.md) |
+| 38.300 | V18.11.0 | NR; NR and NG-RAN Overall Description; Stage 2 | — | 2026-11-10 | [toc](38.300/18.11.0/toc.md) |
 | 38.321 | V18.10.0 | NR; Medium Access Control (MAC) protocol specification | — | 2026-11-05 | [toc](38.321/18.10.0/toc.md) |
 | 38.331 | V17.3.0 | NR; Radio Resource Control (RRC) protocol specification | yes | 2026-11-05 | [toc](38.331/17.3.0/toc.md) |
+| 38.401 | V18.7.0 | NG-RAN; Architecture description | — | 2026-11-10 | [toc](38.401/18.7.0/toc.md) |
+| 38.413 | V15.8.0 | NGAP | yes | 2026-11-10 | [toc](38.413/15.8.0/toc.md) |
+| 38.413 | V17.10.0 | NG-RAN; NG Application Protocol (NGAP) | yes | 2026-11-10 | [toc](38.413/17.10.0/toc.md) |
+| 38.413 | V18.11.0 | NG-RAN; NG Application Protocol (NGAP) | yes | 2026-11-10 | [toc](38.413/18.11.0/toc.md) |
+| 38.423 | V18.9.0 | NG-RAN; Xn application protocol (XnAP) | — | 2026-11-10 | [toc](38.423/18.9.0/toc.md) |
+| 38.470 | V18.5.0 | NG-RAN; F1 general aspects and principles | — | 2026-11-10 | [toc](38.470/18.5.0/toc.md) |
+| 38.473 | V16.21.0 | NG-RAN; F1 application protocol (F1AP) | yes | 2026-11-10 | [toc](38.473/16.21.0/toc.md) |
+| 38.473 | V17.0.0 | F1AP | yes | 2026-11-10 | [toc](38.473/17.0.0/toc.md) |
+| 38.473 | V18.11.0 | NG-RAN; F1 application protocol (F1AP) | yes | 2026-11-10 | [toc](38.473/18.11.0/toc.md) |
+| 38.821 | V16.2.0 | (not in manifest) | — | 2026-11-10 | [toc](38.821/16.2.0/toc.md) |

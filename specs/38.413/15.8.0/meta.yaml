@@ -1,0 +1,12 @@
+id: '38.413'
+title: NGAP
+official_title: ''
+version: 15.8.0
+release: 15
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.413/38413-f80.zip
+archive: 38413-f80.zip
+sha256: 377c4d3f60d3f7de6b1f698fa97a8f7c7f9b20c230e257ef1e42362184b6f6ec
+converted: '2026-11-10'
+documents: 1
+clause_files: 45
+asn1_blocks: 6

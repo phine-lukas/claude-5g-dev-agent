@@ -1,0 +1,12 @@
+id: '38.821'
+title: (not in manifest)
+official_title: ''
+version: 16.2.0
+release: 16
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.821/38821-g20.zip
+archive: 38821-g20.zip
+sha256: 7b3a2528b88fd1446d79c937040972b5da39618b5c2522583f8d13f97f12de85
+converted: '2026-11-10'
+documents: 1
+clause_files: 10
+asn1_blocks: 0

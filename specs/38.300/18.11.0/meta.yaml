@@ -1,0 +1,12 @@
+id: '38.300'
+title: NR overall description
+official_title: NR; NR and NG-RAN Overall Description; Stage 2
+version: 18.11.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.300/38300-ib0.zip
+archive: 38300-ib0.zip
+sha256: 7499d682eebf2cfebe52bc5cbbfde03d06323c235f4ae6c502c5188d93bd788a
+converted: '2026-11-10'
+documents: 1
+clause_files: 44
+asn1_blocks: 0

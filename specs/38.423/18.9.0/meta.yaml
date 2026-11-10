@@ -1,0 +1,12 @@
+id: '38.423'
+title: (not in manifest)
+official_title: NG-RAN; Xn application protocol (XnAP)
+version: 18.9.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.423/38423-i90.zip
+archive: 38423-i90.zip
+sha256: 0e65086128f4c432df6b39cee7ccc588aedaaeec5eafe1cbb6b50ee498cd8270
+converted: '2026-11-10'
+documents: 1
+clause_files: 284
+asn1_blocks: 0

@@ -1,0 +1,12 @@
+id: '38.413'
+title: NGAP
+official_title: NG-RAN; NG Application Protocol (NGAP)
+version: 18.11.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.413/38413-ib0.zip
+archive: 38413-ib0.zip
+sha256: d5d7fa739eb6ff883206ba4433037ea11a3615a69037d03326b8bec8b6c66b55
+converted: '2026-11-10'
+documents: 1
+clause_files: 341
+asn1_blocks: 6

@@ -1,0 +1,12 @@
+id: '38.401'
+title: NG-RAN architecture
+official_title: NG-RAN; Architecture description
+version: 18.7.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.401/38401-i70.zip
+archive: 38401-i70.zip
+sha256: 1b35513961fd59477e5a1aefca9e99da13690fb4213e27b546abbc5c70216436
+converted: '2026-11-10'
+documents: 1
+clause_files: 36
+asn1_blocks: 0
