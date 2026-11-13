@@ -1,0 +1,129 @@
+From 709549c380a1aabcb46d185ebfefec74b20c3b1e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 12:31:19 +0000
+Subject: [PATCH 2/4] fix(smf): do not send an N1N2 transfer with a failed
+ container
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The return values of the N1 and N2 builders were ignored, so a failed N1
+encode still declared an n1MessageContainer with an empty body. The AMF
+answers 200 N1_N2_TRANSFER_INITIATED and returns without forwarding anything
+when a declared part is empty, so a valid N2 part — for instance a QoS Flow
+To Release List for a PCF-initiated removal — was dropped along with it.
+
+Check both builders, declare only the containers that were built, and send no
+transfer at all when neither succeeded (TS 23.502 clause 4.3.3.2 step 3b).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGxt4Ymr7NtUQWN3MP1
+---
+ src/smf_app/smf_context.cpp | 83 +++++++++++++++++++++++++------------
+ 1 file changed, 56 insertions(+), 27 deletions(-)
+
+diff --git a/src/smf_app/smf_context.cpp b/src/smf_app/smf_context.cpp
+index 6db6613..d97170f 100644
+--- a/src/smf_app/smf_context.cpp
++++ b/src/smf_app/smf_context.cpp
+@@ -3308,19 +3308,44 @@ void smf_context::handle_pdu_session_modification_network_requested(
+   Logger::smf_app().debug(
+       "Prepare N1N2MessageTransfer message and send to AMF");
+ 
+-  // TODO: handle encode N1, N2 failure
+   // N1: PDU_SESSION_MODIFICATION_COMMAND
+-  smf_n1::get_instance().create_n1_pdu_session_modification_command(
+-      itti_msg->msg, n1_sm_msg, k5gsmCauseUnknown);
+-  conv::convert_string_2_hex(n1_sm_msg, n1_sm_msg_hex);
+-  itti_msg->msg.set_n1_sm_message(n1_sm_msg_hex);
++  // A container whose builder failed must not be declared in the
++  // N1N2MessageTransfer: the AMF answers N1_N2_TRANSFER_INITIATED and drops
++  // the whole request when a declared part is empty, which would take a valid
++  // N2 part down with it (TS 23.502 §4.3.3.2 step 3b).
++  bool n1_built =
++      smf_n1::get_instance().create_n1_pdu_session_modification_command(
++          itti_msg->msg, n1_sm_msg, k5gsmCauseUnknown);
++  if (n1_built) {
++    conv::convert_string_2_hex(n1_sm_msg, n1_sm_msg_hex);
++    itti_msg->msg.set_n1_sm_message(n1_sm_msg_hex);
++  } else {
++    Logger::smf_app().error(
++        "Could not build the N1 SM container (PDU Session Modification "
++        "Command) - it will not be part of the N1N2MessageTransfer");
++  }
+ 
+-  // N2: PDU Session Resource Modify Response Transfer
+-  smf_n2::get_instance().create_n2_pdu_session_resource_modify_request_transfer(
+-      itti_msg->msg, n2_sm_info_type_e::PDU_RES_MOD_REQ, n2_sm_info);
++  // N2: PDU Session Resource Modify Request Transfer
++  bool n2_built =
++      smf_n2::get_instance()
++          .create_n2_pdu_session_resource_modify_request_transfer(
++              itti_msg->msg, n2_sm_info_type_e::PDU_RES_MOD_REQ, n2_sm_info);
++  if (n2_built) {
++    conv::convert_string_2_hex(n2_sm_info, n2_sm_info_hex);
++    itti_msg->msg.set_n2_sm_information(n2_sm_info_hex);
++  } else {
++    Logger::smf_app().error(
++        "Could not build the N2 SM information (PDU Session Resource Modify "
++        "Request Transfer) - it will not be part of the N1N2MessageTransfer");
++  }
+ 
+-  conv::convert_string_2_hex(n2_sm_info, n2_sm_info_hex);
+-  itti_msg->msg.set_n2_sm_information(n2_sm_info_hex);
++  if (!n1_built and !n2_built) {
++    Logger::smf_app().error(
++        "Neither the N1 nor the N2 part could be built - no "
++        "N1N2MessageTransfer is sent for PDU session %d",
++        itti_msg->msg.get_pdu_session_id());
++    return;
++  }
+ 
+   // Fill N1N2MesasgeTransferRequestData
+   // get supi and put into URL
+@@ -3338,24 +3363,28 @@ void smf_context::handle_pdu_session_modification_network_requested(
+   // Fill the json part
+   nlohmann::json json_data = {};
+   // N1SM
+-  json_data["n1MessageContainer"]["n1MessageClass"] =
+-      oai::utils::N1N2_MESSAGE_CLASS;
+-  json_data["n1MessageContainer"]["n1MessageContent"]["contentId"] =
+-      oai::utils::N1_SM_CONTENT_ID;  // NAS part
++  if (n1_built) {
++    json_data["n1MessageContainer"]["n1MessageClass"] =
++        oai::utils::N1N2_MESSAGE_CLASS;
++    json_data["n1MessageContainer"]["n1MessageContent"]["contentId"] =
++        oai::utils::N1_SM_CONTENT_ID;  // NAS part
++  }
+   // N2SM
+-  json_data["n2InfoContainer"]["n2InformationClass"] =
+-      oai::utils::N1N2_MESSAGE_CLASS;
+-  json_data["n2InfoContainer"]["smInfo"]["pduSessionId"] =
+-      itti_msg->msg.get_pdu_session_id();
+-  // N2InfoContent (section 6.1.6.2.27@3GPP TS 29.518)
+-  json_data["n2InfoContainer"]["smInfo"]["n2InfoContent"]["ngapIeType"] =
+-      "PDU_RES_MOD_REQ";  // NGAP message type
+-  json_data["n2InfoContainer"]["smInfo"]["n2InfoContent"]["ngapData"]
+-           ["contentId"] = N2_SM_CONTENT_ID;  // NGAP part
+-  json_data["n2InfoContainer"]["smInfo"]["sNssai"]["sst"] =
+-      itti_msg->msg.get_snssai().sst;
+-  json_data["n2InfoContainer"]["smInfo"]["sNssai"]["sd"] =
+-      itti_msg->msg.get_snssai().sd;
++  if (n2_built) {
++    json_data["n2InfoContainer"]["n2InformationClass"] =
++        oai::utils::N1N2_MESSAGE_CLASS;
++    json_data["n2InfoContainer"]["smInfo"]["pduSessionId"] =
++        itti_msg->msg.get_pdu_session_id();
++    // N2InfoContent (section 6.1.6.2.27@3GPP TS 29.518)
++    json_data["n2InfoContainer"]["smInfo"]["n2InfoContent"]["ngapIeType"] =
++        "PDU_RES_MOD_REQ";  // NGAP message type
++    json_data["n2InfoContainer"]["smInfo"]["n2InfoContent"]["ngapData"]
++             ["contentId"] = N2_SM_CONTENT_ID;  // NGAP part
++    json_data["n2InfoContainer"]["smInfo"]["sNssai"]["sst"] =
++        itti_msg->msg.get_snssai().sst;
++    json_data["n2InfoContainer"]["smInfo"]["sNssai"]["sd"] =
++        itti_msg->msg.get_snssai().sd;
++  }
+   json_data["pduSessionId"] = itti_msg->msg.get_pdu_session_id();
+   itti_msg->msg.set_json_data(json_data);
+ 

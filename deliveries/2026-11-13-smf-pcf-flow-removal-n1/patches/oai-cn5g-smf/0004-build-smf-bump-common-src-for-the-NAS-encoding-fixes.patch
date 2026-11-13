@@ -1,0 +1,23 @@
+From 664ce87fec256b060fead29ab36612245d569588 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 12:31:25 +0000
+Subject: [PATCH 4/4] build(smf): bump common-src for the NAS encoding fixes
+
+Picks up three fixes in the vendored NAS library that the PDU Session
+Modification Command depends on: the ENCODE macros becoming single
+statements, the QoS rule length indicator staying in sync with what is
+encoded, and the Modification Command's optional IEs carrying their IEI.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGxt4Ymr7NtUQWN3MP1
+---
+ src/common-src | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/common-src b/src/common-src
+index f725043..249a610 160000
+--- a/src/common-src
++++ b/src/common-src
+@@ -1 +1 @@
+-Subproject commit f725043cc3694f29c5ea91b0d244a868f5d4179a
++Subproject commit 249a61033156dd2b2ba19dbb463ba1dacc783731

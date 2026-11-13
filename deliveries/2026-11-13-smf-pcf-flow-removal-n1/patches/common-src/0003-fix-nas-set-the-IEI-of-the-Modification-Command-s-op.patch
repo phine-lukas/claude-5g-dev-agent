@@ -1,0 +1,52 @@
+From 249a61033156dd2b2ba19dbb463ba1dacc783731 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 12:18:53 +0000
+Subject: [PATCH 3/3] fix(nas): set the IEI of the Modification Command's
+ optional IEs
+
+Session-AMBR, the authorized QoS rules and the authorized QoS flow
+descriptions are optional IEs of the PDU Session Modification Command
+(TS 24.501 clause 8.3.7), so each one goes on the wire preceded by its IEI.
+Their setters did not set it, unlike Set5gsmCause() right beside them, so the
+message was encoded as a bare sequence of lengths and contents. The UE stops
+at the first octet it cannot place and rejects the command; this class's own
+Decode() cannot read it back either, because it dispatches on those IEIs.
+
+They are mandatory IEs without an IEI in the PDU Session Establishment
+Accept, which is a different message class and is not affected.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGxt4Ymr7NtUQWN3MP1
+---
+ nas/5gsm-msgs/PduSessionModificationCommand.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/nas/5gsm-msgs/PduSessionModificationCommand.cpp b/nas/5gsm-msgs/PduSessionModificationCommand.cpp
+index 87c908a0..32edccf3 100644
+--- a/nas/5gsm-msgs/PduSessionModificationCommand.cpp
++++ b/nas/5gsm-msgs/PduSessionModificationCommand.cpp
+@@ -64,6 +64,7 @@ void PduSessionModificationCommand::Get5gsmCause(
+ void PduSessionModificationCommand::SetSessionAmbr(
+     const SessionAmbr& session_ambr) {
+   ie_session_ambr_ = std::make_optional<SessionAmbr>(session_ambr);
++  ie_session_ambr_.value().SetIei(kIeiSessionAmbr);
+ }
+ 
+ //------------------------------------------------------------------------------
+@@ -103,6 +104,7 @@ void PduSessionModificationCommand::GetAlwaysOnPduSessionIndication(
+ void PduSessionModificationCommand::SetAuthorizedQosRules(
+     const QosRules& qos_rules) {
+   ie_authorized_qos_rules_ = std::make_optional<QosRules>(qos_rules);
++  ie_authorized_qos_rules_.value().SetIei(kIeiAuthorizedQosRules);
+ }
+ 
+ //------------------------------------------------------------------------------
+@@ -116,6 +118,8 @@ void PduSessionModificationCommand::SetAuthorizedQosFlowDescriptions(
+     const QosFlowDescriptions& flow_descriptions) {
+   ie_authorized_qos_flow_descriptions_ =
+       std::make_optional<QosFlowDescriptions>(flow_descriptions);
++  ie_authorized_qos_flow_descriptions_.value().SetIei(
++      kIeiAuthorizedQosFlowDescriptions);
+ }
+ 
+ //------------------------------------------------------------------------------

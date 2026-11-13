@@ -1,0 +1,12 @@
+id: '24.501'
+title: 5GS NAS
+official_title: ''
+version: 18.14.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/24_series/24.501/24501-ie0.zip
+archive: 24501-ie0.zip
+sha256: 63711a5a5fdb7c5ea0c7e83e348b05952e90bd97150cee1250cec92b9f79b080
+converted: '2026-11-13'
+documents: 1
+clause_files: 351
+asn1_blocks: 0

@@ -5,5 +5,9 @@ Search with `scripts/spec_lookup.py`; cite as `TS <id> V<version> clause <n>`.
 
 | TS | Version | Title | ASN.1 | Converted | Contents |
 |---|---|---|---|---|---|
+| 23.502 | V18.14.0 | 5GS procedures | — | 2026-11-13 | [toc](23.502/18.14.0/toc.md) |
+| 24.501 | V18.14.0 | 5GS NAS | — | 2026-11-13 | [toc](24.501/18.14.0/toc.md) |
+| 29.512 | V18.13.0 | Npcf SMPolicyControl | — | 2026-11-13 | [toc](29.512/18.13.0/toc.md) |
 | 38.321 | V18.10.0 | NR; Medium Access Control (MAC) protocol specification | — | 2026-11-05 | [toc](38.321/18.10.0/toc.md) |
 | 38.331 | V17.3.0 | NR; Radio Resource Control (RRC) protocol specification | yes | 2026-11-05 | [toc](38.331/17.3.0/toc.md) |
+| 38.413 | V17.10.0 | NG-RAN; NG Application Protocol (NGAP) | yes | 2026-11-13 | [toc](38.413/17.10.0/toc.md) |

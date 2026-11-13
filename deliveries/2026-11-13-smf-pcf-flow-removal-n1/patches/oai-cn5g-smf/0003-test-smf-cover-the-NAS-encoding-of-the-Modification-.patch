@@ -1,0 +1,465 @@
+From 6803a006cbdb7c3b4fc201db31e4c850e275de62 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 12:31:19 +0000
+Subject: [PATCH 3/4] test(smf): cover the NAS encoding of the Modification
+ Command
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds test_nas_modification_command.cpp, which encodes the IEs the N1 builders
+assemble — the smf_n1 builders themselves need the global SMF context, so
+they cannot be unit-tested directly.
+
+Asserts that a DELETE QoS rule is the 4 octets with a length indicator of one
+that Table 9.11.4.13.1@3GPP TS 24.501 describes, that what a QoS rule reports
+as its length is what it encodes, that Encode() refuses a buffer smaller than
+the IE, that the removal and creation cases of the PDU Session Modification
+Command both encode to exactly GetLength() octets, that Session-AMBR, the
+authorized QoS rules and the authorized QoS flow descriptions each carry
+their IEI, and that the encoded message decodes again.
+
+Extends test_session_handler.cpp with the rule the handler actually builds,
+and with the case where no edge supplies a rule identifier.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGxt4Ymr7NtUQWN3MP1
+---
+ src/smf_app/test/CMakeLists.txt               |   1 +
+ .../test/test_nas_modification_command.cpp    | 310 ++++++++++++++++++
+ src/smf_app/test/test_session_handler.cpp     |  79 +++++
+ 3 files changed, 390 insertions(+)
+ create mode 100644 src/smf_app/test/test_nas_modification_command.cpp
+
+diff --git a/src/smf_app/test/CMakeLists.txt b/src/smf_app/test/CMakeLists.txt
+index af2d6af..8eee2f0 100644
+--- a/src/smf_app/test/CMakeLists.txt
++++ b/src/smf_app/test/CMakeLists.txt
+@@ -21,6 +21,7 @@ add_executable(${SMF_TEST_TARGET}
+   test_session_handler.cpp
+   test_smf_msg.cpp
+   test_pcf_qod_workflow.cpp
++  test_nas_modification_command.cpp
+   test_sm_policy_association_lifecycle.cpp
+   ${SRC_TOP_DIR}/itti/itti.cpp
+   ${SRC_TOP_DIR}/itti/itti_msg.cpp
+diff --git a/src/smf_app/test/test_nas_modification_command.cpp b/src/smf_app/test/test_nas_modification_command.cpp
+new file mode 100644
+index 0000000..45e1f52
+--- /dev/null
++++ b/src/smf_app/test/test_nas_modification_command.cpp
+@@ -0,0 +1,310 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++// Encoding of the NAS PDU Session Modification Command and of the QoS rules it
++// carries.
++//
++// Standards: TS 24.501 V18.14.0 clause 9.11.4.13 (QoS rules), clause 9.11.4.12
++//            (QoS flow descriptions) and clause 8.3.7 (PDU Session
++//            Modification Command).
++//
++// The smf_n1 builders themselves need the global SMF context, so these tests
++// assemble the same IEs directly and check what goes on the wire.
++
++#include <gtest/gtest.h>
++
++#include <vector>
++
++#include "IeConst.hpp"
++#include "PduSessionModificationCommand.hpp"
++#include "QosFlowDescription.hpp"
++#include "QosFlowDescriptions.hpp"
++#include "QosRule.hpp"
++#include "QosRules.hpp"
++#include "SessionAmbr.hpp"
++#include "_5gsmCause.hpp"
++#include "bstrlib.h"
++#include "common_defs.h"
++#include "3gpp_commons.h"
++
++using namespace oai::nas;
++
++namespace {
++
++// A "delete existing QoS rule", built exactly as
++// session_handler::mark_qfi_for_release() builds it.
++QosRule make_delete_rule(uint8_t rule_id) {
++  QosRule rule = {};
++  rule.SetQosRuleId(rule_id);
++  rule.SetRuleOperationCode(kQosRuleRuleOperationCodeDeleteExistingQosRule);
++  rule.SetNumberOfPacketFilters(0);
++  return rule;
++}
++
++// A "create new QoS rule" with a single match-all packet filter, precedence
++// and QFI — the shape the create path produces.
++QosRule make_create_rule(uint8_t rule_id, uint8_t qfi, uint8_t precedence) {
++  QosRule rule = {};
++  rule.SetQosRuleId(rule_id);
++  rule.SetRuleOperationCode(kQosRuleRuleOperationCodeCreateNewQosRule);
++  rule.SetNumberOfPacketFilters(1);
++
++  // A protocol-identifier filter, built the way
++  // session_handler::set_protocol_filter() builds it.
++  PacketFilterCreateAndModifyAndReplace pf = {};
++  pf.packet_filter_direction               = 0b11;  // bidirectional
++  pf.packet_filter_id                      = 1;
++  uint8_t protocol_id                      = 17;    // UDP
++  PacketFilterComponent component          = {};
++  component.type  = kQosRulePfctiProtocolIdentifierOrNextHeaderType;
++  component.value = blk2bstr(&protocol_id, 1);
++  pf.content.packet_filter_components.push_back(component);
++  pf.content.length = blength(component.value) + 1;  // +1 for the type octet
++  rule.AddPacketFilterCreateAndModifyAndReplace(pf);
++
++  rule.SetPrecedence(precedence);
++  rule.SetQfi(qfi);
++  return rule;
++}
++
++QosFlowDescription make_delete_flow_description(uint8_t qfi) {
++  QosFlowDescription desc = {};
++  desc.SetQfi(qfi);
++  desc.SetOperationCode(
++      kQosFlowDescriptionRuleOperationCodeDeleteExistingQosFlowDescription);
++  return desc;
++}
++
++SessionAmbr make_session_ambr() {
++  SessionAmbr ambr = {};
++  ambr.SetSessionAmbrForDownlink(1);
++  ambr.SetUnitForDownlink(kBitRateUnitValueIsIncrementedInMultiplesOf1Mbps);
++  ambr.SetSessionAmbrForUplink(1);
++  ambr.SetUnitForUplink(kBitRateUnitValueIsIncrementedInMultiplesOf1Mbps);
++  return ambr;
++}
++
++}  // namespace
++
++// =============================================================================
++// QoS rule encoding (TS 24.501 §9.11.4.13)
++// =============================================================================
++
++// Table 9.11.4.13.1: "For the 'delete existing QoS rule' operation, the length
++// of QoS rule field is set to one", and neither the precedence nor the QFI
++// value field shall be included. The whole rule is therefore 4 octets:
++// identifier, two length octets, and octet 7.
++TEST(NasModificationCommandTest, DeleteQosRule_IsFourOctetsWithLengthOne) {
++  const QosRule rule = make_delete_rule(3);
++
++  EXPECT_EQ(rule.GetLengthIndicator(), 1);
++  EXPECT_EQ(rule.GetIeLength(), 4);
++
++  uint8_t buffer[64] = {0};
++  const int encoded  = rule.Encode(buffer, sizeof(buffer));
++  ASSERT_EQ(encoded, 4);
++
++  EXPECT_EQ(buffer[0], 3);     // QoS rule identifier
++  EXPECT_EQ(buffer[1], 0x00);  // length of QoS rule, high octet
++  EXPECT_EQ(buffer[2], 0x01);  // length of QoS rule, low octet
++  // Octet 7: rule operation code 010 in bits 8-6, DQR 0, 0 packet filters.
++  EXPECT_EQ(buffer[3], 0x40);
++}
++
++// A delete rule must not carry a QFI: Table 9.11.4.13.1 forbids the value
++// field, and NOTE 1 forbids octet m+2 without octet m+1 (the precedence).
++TEST(NasModificationCommandTest, DeleteQosRule_CarriesNoQfiOrPrecedence) {
++  const QosRule rule = make_delete_rule(7);
++
++  EXPECT_FALSE(rule.GetQfi().has_value());
++  EXPECT_FALSE(rule.GetPrecedence().has_value());
++}
++
++// The length a rule reports and the number of octets it writes must agree, or
++// the message buffer is sized wrongly.
++TEST(NasModificationCommandTest, QosRule_EncodedSizeMatchesReportedLength) {
++  const QosRule delete_rule = make_delete_rule(3);
++  uint8_t delete_buffer[64] = {0};
++  EXPECT_EQ(
++      delete_rule.Encode(delete_buffer, sizeof(delete_buffer)),
++      static_cast<int>(delete_rule.GetIeLength()));
++
++  const QosRule create_rule = make_create_rule(1, 5, 10);
++  uint8_t create_buffer[64] = {0};
++  EXPECT_EQ(
++      create_rule.Encode(create_buffer, sizeof(create_buffer)),
++      static_cast<int>(create_rule.GetIeLength()));
++}
++
++// Encode() must not write past the end of a buffer that is too small. It
++// writes GetIeLength() octets, so that is what it has to validate against.
++TEST(NasModificationCommandTest, QosRule_RejectsABufferSmallerThanTheIe) {
++  const QosRule rule   = make_delete_rule(3);
++  const uint16_t ie_len = rule.GetIeLength();
++  ASSERT_GT(ie_len, 0);
++
++  std::vector<uint8_t> buffer(ie_len - 1, 0);
++  EXPECT_EQ(rule.Encode(buffer.data(), ie_len - 1), KEncodeDecodeError);
++}
++
++// The QoS rules IE reports header + the sum of its rules.
++TEST(NasModificationCommandTest, QosRules_AggregateLengthMatchesEncodedSize) {
++  std::vector<QosRule> rules = {make_delete_rule(3), make_delete_rule(4)};
++
++  QosRules qos_rules = {};
++  qos_rules.Set(rules);
++
++  uint8_t buffer[128] = {0};
++  const int encoded   = qos_rules.Encode(buffer, sizeof(buffer));
++  ASSERT_GT(encoded, 0);
++  EXPECT_EQ(encoded, static_cast<int>(qos_rules.GetIeLength()));
++}
++
++// =============================================================================
++// PDU Session Modification Command (TS 24.501 §8.3.7)
++// =============================================================================
++
++// The removal case: two delete rules and two delete flow descriptions. Before
++// the fix this did not encode at all, because GetLength() under-counted the
++// rules and the flow descriptions IE no longer fitted in the buffer.
++TEST(NasModificationCommandTest, ModificationCommand_DeleteCase_Encodes) {
++  PduSessionModificationCommand command = {};
++  command.SetHeader(1, 2);
++
++  _5gsmCause cause = {};
++  cause.SetValue(k5gsmCauseRegularDeactivation);
++  command.Set5gsmCause(cause);
++
++  command.SetSessionAmbr(make_session_ambr());
++
++  QosRules qos_rules         = {};
++  std::vector<QosRule> rules = {make_delete_rule(3), make_delete_rule(4)};
++  qos_rules.Set(rules);
++  command.SetAuthorizedQosRules(qos_rules);
++
++  QosFlowDescriptions descriptions                  = {};
++  std::vector<QosFlowDescription> description_list = {
++      make_delete_flow_description(5), make_delete_flow_description(9)};
++  descriptions.Set(description_list);
++  command.SetAuthorizedQosFlowDescriptions(descriptions);
++
++  const uint32_t msg_len = command.GetLength();
++  std::vector<uint8_t> buffer(msg_len, 0);
++  const int encoded = command.Encode(buffer.data(), msg_len);
++
++  ASSERT_NE(encoded, KEncodeDecodeError);
++  EXPECT_EQ(encoded, static_cast<int>(msg_len));
++}
++
++// The creation case has to keep working.
++TEST(NasModificationCommandTest, ModificationCommand_CreateCase_Encodes) {
++  PduSessionModificationCommand command = {};
++  command.SetHeader(1, 2);
++
++  _5gsmCause cause = {};
++  cause.SetValue(k5gsmCauseRegularDeactivation);
++  command.Set5gsmCause(cause);
++
++  command.SetSessionAmbr(make_session_ambr());
++
++  QosRules qos_rules         = {};
++  std::vector<QosRule> rules = {make_create_rule(1, 5, 10)};
++  qos_rules.Set(rules);
++  command.SetAuthorizedQosRules(qos_rules);
++
++  QosFlowDescription create_description = {};
++  create_description.SetQfi(5);
++  create_description.SetOperationCode(
++      kQosFlowDescriptionRuleOperationCodeCreateNewQosFlowDescription);
++  QosFlowDescriptions descriptions                 = {};
++  std::vector<QosFlowDescription> description_list = {create_description};
++  descriptions.Set(description_list);
++  command.SetAuthorizedQosFlowDescriptions(descriptions);
++
++  const uint32_t msg_len = command.GetLength();
++  std::vector<uint8_t> buffer(msg_len, 0);
++  const int encoded = command.Encode(buffer.data(), msg_len);
++
++  ASSERT_NE(encoded, KEncodeDecodeError);
++  EXPECT_EQ(encoded, static_cast<int>(msg_len));
++}
++
++// Session-AMBR, authorized QoS rules and authorized QoS flow descriptions are
++// optional IEs of the Modification Command, so each one goes on the wire
++// preceded by its IEI. Without them the UE stops at the first unknown octet.
++TEST(NasModificationCommandTest, ModificationCommand_OptionalIesCarryTheirIei) {
++  PduSessionModificationCommand command = {};
++  command.SetHeader(1, 2);
++
++  _5gsmCause cause = {};
++  cause.SetValue(k5gsmCauseRegularDeactivation);
++  command.Set5gsmCause(cause);
++
++  command.SetSessionAmbr(make_session_ambr());
++
++  QosRules qos_rules         = {};
++  std::vector<QosRule> rules = {make_delete_rule(3)};
++  qos_rules.Set(rules);
++  command.SetAuthorizedQosRules(qos_rules);
++
++  QosFlowDescriptions descriptions                 = {};
++  std::vector<QosFlowDescription> description_list = {
++      make_delete_flow_description(5)};
++  descriptions.Set(description_list);
++  command.SetAuthorizedQosFlowDescriptions(descriptions);
++
++  const uint32_t msg_len = command.GetLength();
++  std::vector<uint8_t> buffer(msg_len, 0);
++  const int encoded = command.Encode(buffer.data(), msg_len);
++  ASSERT_NE(encoded, KEncodeDecodeError);
++
++  // 4 octets of 5GSM header, then the 5GSM cause with its IEI.
++  ASSERT_GE(encoded, 6);
++  EXPECT_EQ(buffer[4], kIei5gsmCause);
++
++  // Session-AMBR follows the cause, then the QoS rules and the QoS flow
++  // descriptions, each introduced by its own IEI.
++  const uint8_t* ambr = &buffer[6];
++  EXPECT_EQ(ambr[0], kIeiSessionAmbr);
++  const uint8_t* qos_rules_ie = ambr + 1 /* IEI */ + 1 /* length */ + ambr[1];
++  EXPECT_EQ(qos_rules_ie[0], kIeiAuthorizedQosRules);
++  const uint8_t* flow_descriptions_ie =
++      qos_rules_ie + 3 /* IEI + 2 length octets */ +
++      ((qos_rules_ie[1] << 8) | qos_rules_ie[2]);
++  EXPECT_EQ(flow_descriptions_ie[0], kIeiAuthorizedQosFlowDescriptions);
++}
++
++// What the SMF encodes, the NAS library must be able to decode again. This
++// fails without the IEIs, because Decode() dispatches on them.
++TEST(NasModificationCommandTest, ModificationCommand_RoundTripsThroughDecode) {
++  PduSessionModificationCommand command = {};
++  command.SetHeader(1, 2);
++
++  _5gsmCause cause = {};
++  cause.SetValue(k5gsmCauseRegularDeactivation);
++  command.Set5gsmCause(cause);
++
++  command.SetSessionAmbr(make_session_ambr());
++
++  QosRules qos_rules         = {};
++  std::vector<QosRule> rules = {make_delete_rule(3), make_delete_rule(4)};
++  qos_rules.Set(rules);
++  command.SetAuthorizedQosRules(qos_rules);
++
++  const uint32_t msg_len = command.GetLength();
++  std::vector<uint8_t> buffer(msg_len, 0);
++  const int encoded = command.Encode(buffer.data(), msg_len);
++  ASSERT_NE(encoded, KEncodeDecodeError);
++
++  PduSessionModificationCommand decoded = {};
++  EXPECT_NE(decoded.Decode(buffer.data(), encoded), KEncodeDecodeError);
++
++  std::optional<QosRules> decoded_rules = {};
++  decoded.GetAuthorizedQosRules(decoded_rules);
++  ASSERT_TRUE(decoded_rules.has_value());
++
++  std::vector<QosRule> round_tripped = {};
++  decoded_rules.value().Get(round_tripped);
++  EXPECT_EQ(round_tripped.size(), 2u);
++}
+diff --git a/src/smf_app/test/test_session_handler.cpp b/src/smf_app/test/test_session_handler.cpp
+index 97495f2..59d0919 100644
+--- a/src/smf_app/test/test_session_handler.cpp
++++ b/src/smf_app/test/test_session_handler.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "3gpp_24.501.hpp"
+ #include "session_handler.hpp"
++#include "smf_qos_upf_edge.hpp"
+ #include "smf_pfcp_association.hpp"
+ 
+ using namespace oai::app::smf;
+@@ -28,6 +29,30 @@ std::unique_ptr<session_handler> make_session_handler(
+   return handler;
+ }
+ 
++// A session handler whose graph holds one N3 edge per QFI, each carrying a
++// QoS rule identifier, so that release builds a real DELETE QoS rule.
++std::unique_ptr<session_handler> make_session_handler_with_edges(
++    const std::vector<std::pair<uint8_t, uint8_t>>& qfi_and_rule_id) {
++  auto handler = std::make_unique<session_handler>(
++      pdu_session_type_e::PDU_SESSION_TYPE_E_IPV4);
++  auto graph = std::make_shared<upf_graph>();
++
++  oai::config::smf::upf upf_cfg("127.0.0.1", 8805, false, true, false, "");
++  auto upf = std::make_shared<pfcp_association>(upf_cfg);
++
++  for (const auto& [qfi, rule_id] : qfi_and_rule_id) {
++    auto edge     = std::make_shared<qos_upf_edge>();
++    edge->qfi.qfi = qfi;
++    edge->type.setEnumValue(UPInterfaceType_anyOf::eUPInterfaceType_anyOf::N3);
++    edge->default_qos = false;
++    edge->qos_rule_id = rule_id;
++    graph->add_qos_flow_edge(upf, edge);
++  }
++
++  handler->set_session_graph(graph);
++  return handler;
++}
++
+ }  // namespace
+ 
+ // =============================================================================
+@@ -76,6 +101,60 @@ TEST(SessionHandlerTest, MarkQfiForRelease_CreatesAndStashesDeleteDescriptors) {
+   EXPECT_EQ(retrieved_list[1].qfi.qfi, 9);
+ }
+ 
++// Table 9.11.4.13.1@3GPP TS 24.501: for the "delete existing QoS rule"
++// operation the packet filter list is empty and neither the QoS rule
++// precedence nor the QoS flow identifier value field is included, which makes
++// the rule 4 octets long with a length indicator of one.
++TEST(SessionHandlerTest, MarkQfiForRelease_BuildsASpecCompliantDeleteRule) {
++  auto handler = make_session_handler_with_edges({{5, 3}});
++
++  pfcp::qfi_t target_qfi;
++  target_qfi.qfi = 5;
++  handler->mark_qfi_for_release(target_qfi);
++
++  auto retrieved_list = handler->get_qos_flows_to_be_released();
++  ASSERT_EQ(retrieved_list.size(), 1u);
++  ASSERT_EQ(retrieved_list[0].qos_rules.size(), 1u);
++
++  const auto& qos_rule = retrieved_list[0].qos_rules.begin()->second;
++  EXPECT_EQ(qos_rule.GetQosRuleId(), 3);
++  EXPECT_EQ(
++      qos_rule.GetRuleOperationCode(),
++      oai::nas::kQosRuleRuleOperationCodeDeleteExistingQosRule);
++  EXPECT_EQ(qos_rule.GetNumberOfPacketFilters(), 0);
++  EXPECT_FALSE(qos_rule.GetQfi().has_value());
++  EXPECT_FALSE(qos_rule.GetPrecedence().has_value());
++
++  EXPECT_EQ(qos_rule.GetLengthIndicator(), 1);
++  EXPECT_EQ(qos_rule.GetIeLength(), 4);
++
++  uint8_t buffer[32] = {0};
++  EXPECT_EQ(qos_rule.Encode(buffer, sizeof(buffer)), 4);
++}
++
++// "The network shall not set the QRI value to 0" (Table 9.11.4.13.1@3GPP
++// TS 24.501). Without an edge there is no rule identifier to delete, so the
++// flow is still released but carries no N1 QoS rule, rather than one the UE
++// would reject.
++TEST(SessionHandlerTest, MarkQfiForRelease_OmitsTheRuleWhenNoIdentifierExists) {
++  auto handler = make_session_handler();
++
++  pfcp::qfi_t target_qfi;
++  target_qfi.qfi = 5;
++  handler->mark_qfi_for_release(target_qfi);
++
++  auto retrieved_list = handler->get_qos_flows_to_be_released();
++  ASSERT_EQ(retrieved_list.size(), 1u);
++  EXPECT_TRUE(retrieved_list[0].to_be_removed);
++  EXPECT_TRUE(retrieved_list[0].qos_rules.empty());
++
++  // The flow description still tells the UE to delete the flow.
++  EXPECT_EQ(
++      retrieved_list[0].get_qos_flow_descriptions().GetOperationCode(),
++      oai::nas::
++          kQosFlowDescriptionRuleOperationCodeDeleteExistingQosFlowDescription);
++}
++
+ // =============================================================================
+ // Rollback Mechanics
+ // =============================================================================

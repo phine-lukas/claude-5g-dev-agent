@@ -1,0 +1,130 @@
+From 02c83fa82967d21190c5756bb14ba0d75f09960b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 12:18:53 +0000
+Subject: [PATCH 2/3] fix(nas): keep the QoS rule length indicator in sync
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SetRuleOperationCode() and SetNumberOfPacketFilters() did not recompute the
+length indicator, and the constructor left the rule identifier, the operation
+code and the packet filter count uninitialised. A rule built only from those
+setters — a "delete existing QoS rule" — kept the constructor's placeholder
+length of 4 while encoding 4 octets, so GetIeLength() reported 7.
+
+Recompute the indicator in both setters and initialise every member. For the
+delete operation this now yields the length of one that
+Table 9.11.4.13.1@3GPP TS 24.501 mandates.
+
+SetLengthIndicator() also counted the create/modify packet filter list once
+per packet filter instead of once in total, so a rule with more than one
+filter claimed a length quadratic in the filter count. Count each filter
+once, and size the Encode() buffer check by GetIeLength(), which is what
+Encode() actually writes, instead of by the content length alone.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGxt4Ymr7NtUQWN3MP1
+---
+ nas/ies/QosRule.cpp | 57 ++++++++++++++++++++++++++++-----------------
+ 1 file changed, 35 insertions(+), 22 deletions(-)
+
+diff --git a/nas/ies/QosRule.cpp b/nas/ies/QosRule.cpp
+index 1f36fffe..dbac1647 100644
+--- a/nas/ies/QosRule.cpp
++++ b/nas/ies/QosRule.cpp
+@@ -13,7 +13,12 @@ using namespace oai::nas;
+ 
+ //------------------------------------------------------------------------------
+ QosRule::QosRule()
+-    : length_(kQosRuleMinimumLength), segregation_(false), dqr_bit_(false) {}
++    : qos_rule_id_(0),
++      length_(kQosRuleMinimumLength),
++      rule_operation_code_(kQosRuleRuleOperationCodeReserved000),
++      dqr_bit_(false),
++      number_of_packet_filters_(0),
++      segregation_(false) {}
+ 
+ //------------------------------------------------------------------------------
+ QosRule::~QosRule() {}
+@@ -25,25 +30,29 @@ uint16_t QosRule::GetLengthIndicator() const {
+ 
+ //------------------------------------------------------------------------------
+ void QosRule::SetLengthIndicator() {
+-  // Calculate the actual length
++  // Calculate the actual length. For the "delete existing QoS rule" operation
++  // the packet filter list is empty and neither the precedence nor the QFI is
++  // present, so this yields the length of one the spec mandates
++  // (Table 9.11.4.13.1@3GPP TS 24.501).
+   length_ = 1;  // Rule Operation Code + DQR + Number of packet filters
+-  for (int i = 0; i < number_of_packet_filters_; i++) {
+-    if (rule_operation_code_ ==
+-        kQosRuleRuleOperationCodeModifyExistingQosRuleAndDeletePacketFilters) {
+-      length_++;  // 1 octet for each packet filter
+-    } else if (
+-        (rule_operation_code_ == kQosRuleRuleOperationCodeCreateNewQosRule) or
+-        (rule_operation_code_ ==
+-         kQosRuleRuleOperationCodeModifyExistingQosRuleAndAddPacketFilters) or
+-        (rule_operation_code_ ==
+-         kQosRuleRuleOperationCodeModifyExistingQosRuleAndReplaceAllPacketFilters)) {
+-      if (pf_create_and_modify_and_replace_list_.has_value()) {
+-        for (auto p : pf_create_and_modify_and_replace_list_.value()) {
+-          length_ +=
+-              1;  // octet 8- packet filter direction + packet filter identifier
+-          length_ += 1;                 // length of packet filter
+-          length_ += p.content.length;  // packet filter content
+-        }
++
++  if (rule_operation_code_ ==
++      kQosRuleRuleOperationCodeModifyExistingQosRuleAndDeletePacketFilters) {
++    // One octet per packet filter identifier (Figure 9.11.4.13.3)
++    length_ += number_of_packet_filters_;
++  } else if (
++      (rule_operation_code_ == kQosRuleRuleOperationCodeCreateNewQosRule) or
++      (rule_operation_code_ ==
++       kQosRuleRuleOperationCodeModifyExistingQosRuleAndAddPacketFilters) or
++      (rule_operation_code_ ==
++       kQosRuleRuleOperationCodeModifyExistingQosRuleAndReplaceAllPacketFilters)) {
++    // Each packet filter is encoded once (Figure 9.11.4.13.4)
++    if (pf_create_and_modify_and_replace_list_.has_value()) {
++      for (const auto& p : pf_create_and_modify_and_replace_list_.value()) {
++        length_ +=
++            1;  // octet 8- packet filter direction + packet filter identifier
++        length_ += 1;                 // length of packet filter
++        length_ += p.content.length;  // packet filter content
+       }
+     }
+   }
+@@ -76,6 +85,7 @@ uint8_t QosRule::GetQosRuleId() const {
+ //------------------------------------------------------------------------------
+ void QosRule::SetRuleOperationCode(uint8_t code) {
+   rule_operation_code_ = code & 0x07;  // 3 bits
++  SetLengthIndicator();
+ }
+ 
+ //------------------------------------------------------------------------------
+@@ -105,6 +115,7 @@ bool QosRule::GetDqrBit() const {
+ //------------------------------------------------------------------------------
+ void QosRule::SetNumberOfPacketFilters(uint8_t no_pf) {
+   number_of_packet_filters_ = no_pf & 0x0f;  // 4 bits
++  SetLengthIndicator();
+ }
+ 
+ //------------------------------------------------------------------------------
+@@ -224,12 +235,14 @@ int QosRule::Encode(uint8_t* buf, int len) const {
+ 
+   int encoded_size = 0;
+ 
+-  // Validate the buffer's length and Encode IEI/Length (later)
+-  if (len < length_) {
++  // Validate the buffer's length. Encode() writes the QoS rule identifier and
++  // the two length octets on top of the rule content, so the buffer has to
++  // hold GetIeLength() octets, not just the length indicator.
++  if (len < GetIeLength()) {
+     oai::logger::logger_common::nas().error(
+         "Buffer length is less than the length of this IE (%d "
+         "octet)",
+-        length_);
++        GetIeLength());
+     return KEncodeDecodeError;
+   }
+ 

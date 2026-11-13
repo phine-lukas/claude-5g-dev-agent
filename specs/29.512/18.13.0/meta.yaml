@@ -1,0 +1,12 @@
+id: '29.512'
+title: Npcf SMPolicyControl
+official_title: ''
+version: 18.13.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/29_series/29.512/29512-id0.zip
+archive: 29512-id0.zip
+sha256: 07db79639d54470aa17cbfb910a2597680596df31efe7bac72cb830994b47280
+converted: '2026-11-13'
+documents: 1
+clause_files: 59
+asn1_blocks: 0
