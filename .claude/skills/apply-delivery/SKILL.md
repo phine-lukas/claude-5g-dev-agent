@@ -12,16 +12,15 @@ a toolkit fix to be published, commit it on `main` and use
 
 ## 1. Locate the delivery
 1. Find the toolkit repo: `$DEV_AGENT_HOME`, else `~/5g-dev-agent`, else ask.
-2. Fetch the delivery branch and read it WITHOUT switching the user's
-   checkout — their toolkit stays on `main`:
+2. Deliveries live in `deliveries/<slug>` on `main`, so just update `main`:
    ```bash
-   git fetch origin claude/delivery-<slug>
-   git checkout FETCH_HEAD -- deliveries/<slug>   # files land in the worktree
+   git pull --ff-only origin main
+   ls deliveries/<slug>
    ```
-   The slug comes from the user, the branch name, or pasted cloud output.
-   To drop the files again afterwards:
-   `git restore --staged --worktree -- deliveries/<slug> && rm -rf deliveries/<slug>`.
-   Only switch to the delivery branch if the user asks for it.
+   The slug comes from the user or from pasted cloud output.
+   Older deliveries made before this change still sit on their own branch
+   `claude/delivery-<slug>`; fetch one of those without switching with
+   `git fetch origin claude/delivery-<slug> && git checkout FETCH_HEAD -- deliveries/<slug>`.
    Read `README.md`, `CHANGES.md`, `OPEN_ISSUES.md`, `APPLY.md` of the delivery.
 3. Summarize to the user in a few lines: what it does, number of patches,
    base commit, open issues. Ask before proceeding if open issues look

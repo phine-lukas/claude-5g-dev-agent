@@ -38,3 +38,4 @@ specs:
   - { id: "29.502", title: "Nsmf PDU session",                    tags: [cn] }
   - { id: "29.532", title: "Nmbsmf MBS session management",       tags: [cn, mbs] }
   - { id: "29.518", title: "Namf communication",                  tags: [cn] }
+  - { id: "29.512", title: "Npcf SMPolicyControl",                 tags: [cn, pcf] }

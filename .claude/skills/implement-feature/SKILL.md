@@ -202,12 +202,12 @@ reviewer sees what went wrong along the way.
    a stale profile value, a script that needed fixing, a spec added to the
    manifest — commit that on `main` of this repo, separately from the
    delivery and with its own message, and push it with
-   `scripts/push_toolkit.sh`. Do this BEFORE step 5, so the delivery branch
-   (cut from `main`) carries the fix. Nothing else goes to `main`: the
-   delivery folder and the patches belong on the delivery branch only.
+   `scripts/push_toolkit.sh`. Do this BEFORE step 5, so those commits are
+   already on `main` when the delivery lands on top of them.
 5. `scripts/push_delivery.sh <slug>` commits the delivery folder (and any
-   newly converted specs) on branch `claude/delivery-<slug>` of this toolkit
-   repo and pushes it.
+   newly converted specs) as `deliveries/<slug>` on `main` of this toolkit
+   repo and pushes it. Deliveries are not put on a branch of their own, so
+   reading one never needs a checkout.
 6. Post a final summary in chat: delivery path + branch, commit list, what
    was verified, what needs local testing, open issues. Mention any toolkit
    commit pushed to `main` in step 4.
