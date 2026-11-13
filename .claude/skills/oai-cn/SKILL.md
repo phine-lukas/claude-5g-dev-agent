@@ -59,6 +59,15 @@ UPF adds `src/upf_app/` (with `control/`, `simpleswitch/`, `bpf/` datapaths) and
 
 ### Native
 
+A fresh clone has **empty submodules** — `src/common-src` (the vendored NAS /
+PFCP / NGAP library), `build/common-build` and `ci-scripts/common`. `build_<nf>`
+syncs them itself, but anything that reads the sources first (grep, a review,
+a patch) sees nothing until you run:
+
+```bash
+git submodule update --init --recursive
+```
+
 Each NF has a build script with the same shape:
 
 ```bash
@@ -92,6 +101,15 @@ Tests are GoogleTest, driven by ctest. They live in `test/` directories inside `
 | `oai-cn5g-upf` | `src/common-src/test/`, `src/common-src/ngap/test/`, `src/common-src/nas/test/` |
 
 Two ways to run them — **the Docker one is what CI does and needs no host dependencies**:
+
+**`--install-deps` does NOT install GoogleTest**, so a native `--tests` run on a
+fresh machine fails at `#include <gtest/gtest.h>`. Install it first (the
+Dockerfile's `checks` stage also asks for `googletest-tools`, which no longer
+exists on Ubuntu 24.04 — skip it):
+
+```bash
+sudo apt-get install -y libgtest-dev libgmock-dev
+```
 
 ```bash
 # Native: builds the smf_unit_tests binary and runs it
