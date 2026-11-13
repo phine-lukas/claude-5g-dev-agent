@@ -9,11 +9,11 @@ Nothing here pushes. You apply the patches, build, test, and open the PR yoursel
 - Each base commit must be reachable locally. If `git cat-file -e <BASE_SHA>`
   fails, `git fetch origin` first — base commits often live on private feature
   branches that your clone has not seen yet.
-- This delivery lives on branch `claude/delivery-<SLUG>` of the toolkit repo:
+- This delivery lives in `deliveries/<SLUG>` on `main` of the toolkit repo:
 
 ```bash
 cd "$DEV_AGENT_HOME"
-git fetch origin && git switch claude/delivery-<SLUG>
+git switch main && git pull --ff-only origin main
 DELIVERY="$DEV_AGENT_HOME/deliveries/<SLUG>"
 ```
 
