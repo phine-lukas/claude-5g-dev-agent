@@ -1,0 +1,966 @@
+From 205c3a07c1c4b73dde99270597401ccb1e8ae204 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 17:08:36 +0000
+Subject: [PATCH 3/3] NAS: let the nrUE join a multicast MBS session
+
+The UE could not ask to join one: there was no PDU Session Modification
+Request encoder at all, and neither MBS container existed in either direction.
+
+- MbsContainers.{c,h} encodes the Requested MBS container (TS 24.501 V18.14.0
+  clause 9.11.4.30) and decodes the Received MBS container (clause 9.11.4.31),
+  including walking over the optional fields -- addresses, service area,
+  timers, security container -- that the UE has no use for yet but that have to
+  be sized correctly or the next entry cannot be found.
+
+- PduSessionModificationRequest.{c,h} encodes the message around it
+  (clause 8.3.7), with the container as the type 6 IE 0x70 it is.
+
+- The PDU Session Modification Command decoder takes IEI 0x71 and reports what
+  the network decided, which the UE logs per session with the decision and,
+  for a rejection, its cause (clause 6.3.2.3).
+
+- --mbs-join <tmgi hex> names the session to join. The join is sent once a PDU
+  session it can ride on is up, because clause 7.2.1.3 step 1 needs "an
+  existing PDU session that can be used to send the UE join request", and only
+  once. Giving the option to one UE's process and not another's is what lets a
+  test decide which UE joins.
+
+Acting on an accepted join -- a multicast MRB, a G-RNTI -- is the radio work
+and is not here; what the UE does today is ask, and say what it was told.
+
+nas_lib_test gains the octets of both containers checked against the clause,
+the whole Modification Request, the optional-field skipping, the malformed
+cases, and the parsing of --mbs-join's argument.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGwmGjgMjM39K5jaxnP
+---
+ executables/nr-uesoftmodem.c                  |   5 +
+ executables/nr-uesoftmodem.h                  |   5 +
+ .../NAS/NR_UE/5GS/5GSM/MSG/CMakeLists.txt     |   4 +-
+ .../NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.c    | 174 ++++++++++++++++++
+ .../NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.h    |  92 +++++++++
+ .../5GSM/MSG/PduSessionModificationCommand.c  |  18 ++
+ .../5GSM/MSG/PduSessionModificationCommand.h  |   8 +-
+ .../5GSM/MSG/PduSessionModificationRequest.c  |  49 +++++
+ .../5GSM/MSG/PduSessionModificationRequest.h  |  44 +++++
+ openair3/NAS/NR_UE/5GS/tests/nas_lib_test.c   | 141 ++++++++++++++
+ openair3/NAS/NR_UE/nr_nas_msg.c               | 172 +++++++++++++++++
+ openair3/NAS/NR_UE/nr_nas_msg.h               |   7 +
+ 12 files changed, 717 insertions(+), 2 deletions(-)
+ create mode 100644 openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.c
+ create mode 100644 openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.h
+ create mode 100644 openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.c
+ create mode 100644 openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.h
+
+diff --git a/executables/nr-uesoftmodem.c b/executables/nr-uesoftmodem.c
+index c13a9b3e3..72d699c6a 100644
+--- a/executables/nr-uesoftmodem.c
++++ b/executables/nr-uesoftmodem.c
+@@ -275,6 +275,11 @@ int main(int argc, char **argv)
+ 
+   nr_pdcp_layer_init();
+   nas_init_nrue(NB_UE_INST);
++  /* --mbs-join names a multicast MBS session every UE of this process joins once its PDU session is
++   * up. A test decides which UE joins by giving the option to that UE's process. */
++  if (nrUE_params.mbs_join_tmgi != NULL)
++    for (int i = 0; i < NB_UE_INST; i++)
++      nas_set_mbs_join(i, nrUE_params.mbs_join_tmgi);
+ 
+   nrue_set_ru_params(uniqCfg);
+   nrue_set_cell_params(uniqCfg);
+diff --git a/executables/nr-uesoftmodem.h b/executables/nr-uesoftmodem.h
+index 0d911bee1..edabd92e8 100644
+--- a/executables/nr-uesoftmodem.h
++++ b/executables/nr-uesoftmodem.h
+@@ -35,6 +35,7 @@ extern uint16_t ue_id_g;
+ #define  CONFIG_HLP_DISABLE_BLIND_SEARCH   "Disable blind search for UE searches by neighboring cells\n"
+ #define  CONFIG_HLP_RX2TX                  "Defines ue capability in slots to produce an UL feedback from its relative DL meassage (DCI->ULSCH or PDSCH->PUCCH)"
+ #define  CONFIG_HLP_SL_SYNCSOURCEUE        "Sidelink UE acts as SYNC REF UE"
++#define  CONFIG_HLP_MBS_JOIN               "Join a multicast MBS session once registered and the PDU session is up: its TMGI as 12 hex characters (3 octets of MBS Service ID then the PLMN), e.g. --mbs-join abcdef99f907\n"
+ 
+ /***************************************************************************************************************************************/
+ /* command line options definitions, CMDLINE_XXXX_DESC macros are used to initialize paramdef_t arrays which are then used as argument
+@@ -89,6 +90,7 @@ extern uint16_t ue_id_g;
+   {"ue-fd",                    "Frequency-domain I/O through the UE Low-PHY (executables/ue_fd)",  PARAMFLAG_BOOL,  .iptr=&nrUE_params.use_ue_fd, .defintval=0, TYPE_INT, 0}, \
+   {"ue-fd-sync-timeout",       "FD-UE sync search timeout in ms (default 5000)", 0, .iptr=&nrUE_params.ue_fd_sync_timeout_ms, .defintval=5000, TYPE_INT, 0}, \
+   {"sync-ref",                     CONFIG_HLP_SL_SYNCSOURCEUE, 0,               .uptr=&(nrUE_params.sync_ref),               .defuintval=0,     TYPE_UINT32,   0}, \
++  {"mbs-join",                     CONFIG_HLP_MBS_JOIN,        0,               .strptr=&nrUE_params.mbs_join_tmgi,          .defstrval=NULL,   TYPE_STRING,   0}, \
+ }
+ // clang-format on
+ 
+@@ -135,6 +137,9 @@ typedef struct {
+   int ue_capability_rx2tx;
+   int use_ue_fd; // frequency-domain UE threads on the UE Low-PHY
+   int ue_fd_sync_timeout_ms;  // sync search timeout of the UE Low-PHY
++  /* --mbs-join: the TMGI of a multicast MBS session to join, as 12 hex characters. NULL when the UE
++   * is not to join one, which is what makes a test able to decide which UE joins. */
++  char *mbs_join_tmgi;
+   uint32_t sync_ref;
+ } nrUE_params_t;
+ extern uint64_t get_nrUE_optmask(void);
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/CMakeLists.txt b/openair3/NAS/NR_UE/5GS/5GSM/MSG/CMakeLists.txt
+index fbddef053..fb477b311 100644
+--- a/openair3/NAS/NR_UE/5GS/5GSM/MSG/CMakeLists.txt
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/CMakeLists.txt
+@@ -4,7 +4,9 @@ add_library(fgs_5gsm_lib OBJECT fgsm_lib.c
+                             PduSessionEstablishRequest.c
+                             PduSessionEstablishmentAccept.c
+                             PduSessionModificationCommand.c
+-                            PduSessionModificationComplete.c)
++                            PduSessionModificationComplete.c
++                            PduSessionModificationRequest.c
++                            MbsContainers.c)
+ 
+ target_link_libraries(fgs_5gsm_lib PUBLIC nas_common_ies_lib log_headers packet_filter_lib)
+ 
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.c b/openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.c
+new file mode 100644
+index 000000000..41fa34faf
+--- /dev/null
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.c
+@@ -0,0 +1,174 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++#include "MbsContainers.h"
++#include <ctype.h>
++#include <string.h>
++#include "common/utils/LOG/log.h"
++
++/*
++ * Requested MBS container, TS 24.501 clause 9.11.4.30 figure 9.11.4.30.2. One entry is:
++ *
++ *   octet 4   bits 1-2 Type of multicast MBS session ID, bits 3-4 MBS operation, bits 5-8 spare
++ *   octet 5.. the session ID: 6 octets for a TMGI
++ *
++ * Entries are not length-prefixed; the length of each follows from its ID type.
++ */
++int encode_requested_mbs_container(uint8_t *buffer, uint32_t size, const requested_mbs_info_t *info, int num)
++{
++  uint32_t encoded = 0;
++
++  if ((uint32_t)num * (1 + MBS_TMGI_LEN) > size) {
++    LOG_E(NAS, "Requested MBS container: %d entries do not fit in %u octets\n", num, size);
++    return -1;
++  }
++
++  for (int i = 0; i < num; i++) {
++    buffer[encoded++] = (uint8_t)(((info[i].operation & 0x03) << 2) | (MBS_SESSION_ID_TMGI & 0x03));
++    memcpy(buffer + encoded, info[i].tmgi, MBS_TMGI_LEN);
++    encoded += MBS_TMGI_LEN;
++  }
++
++  return encoded;
++}
++
++/*
++ * Received MBS container, TS 24.501 clause 9.11.4.31 figure 9.11.4.31.2. One entry is:
++ *
++ *   octet 4   bits 1-3 MBS decision (MD), bits 4-5 MBS service area indication (MSAI),
++ *             bits 6-8 Rejection cause
++ *   octet 5   bit 1 IPAE, bits 2-3 MTI, bit 4 MSCI, bit 5 IPAT, bits 6-8 spare
++ *   octet 6.. TMGI (6 octets), then whatever the flags of octet 5 switched on
++ *
++ * The optional parts are skipped rather than kept: the UE has no use for them until it has a
++ * multicast MRB. They still have to be walked over, or the next entry cannot be found -- which is
++ * why an entry whose flags the decoder cannot size ends the decode.
++ */
++int decode_received_mbs_container(received_mbs_container_t *out, const uint8_t *buffer, uint32_t length)
++{
++  uint32_t pos = 0;
++
++  if (!out || !buffer)
++    return -1;
++
++  memset(out, 0, sizeof(*out));
++
++  while (pos < length) {
++    if (pos + 2 + MBS_TMGI_LEN > length) {
++      LOG_E(NAS, "Received MBS container: entry at octet %u runs past the IE (%u octets)\n", pos, length);
++      return -1;
++    }
++
++    uint8_t octet4 = buffer[pos];
++    uint8_t octet5 = buffer[pos + 1];
++    uint8_t decision = octet4 & 0x07;
++    uint8_t msai = (octet4 >> 3) & 0x03;
++    uint8_t cause = (octet4 >> 5) & 0x07;
++    bool ipae = octet5 & 0x01;
++    uint8_t mti = (octet5 >> 1) & 0x03;
++    bool msci = (octet5 >> 3) & 0x01;
++    bool ipv6 = (octet5 >> 4) & 0x01;
++
++    pos += 2;
++
++    if (out->num < MBS_MAX_SESSIONS) {
++      received_mbs_info_t *info = &out->info[out->num];
++      info->decision = (mbs_decision_t)decision;
++      info->reject_cause = (mbs_reject_cause_t)cause;
++      memcpy(info->tmgi, buffer + pos, MBS_TMGI_LEN);
++      out->num++;
++    } else {
++      LOG_W(NAS, "Received MBS container: more than %d entries, the rest is ignored\n", MBS_MAX_SESSIONS);
++    }
++    pos += MBS_TMGI_LEN;
++
++    /* "If IPAE is set to 'Source and destination IP address information included', Source IP address
++     * information and Destination IP address information shall be included" -- a pair of addresses,
++     * v4 or v6 as IPAT says. */
++    if (ipae)
++      pos += ipv6 ? 32 : 8;
++
++    /* The MBS service area is a 5GS tracking area identity list, an NR CGI list, or both, and only
++     * the NR CGI list carries its own length. A TAI list cannot be sized without decoding it, so a
++     * container that has one ends the decode here rather than guessing. */
++    if (msai == 1 || msai == 3) {
++      LOG_W(NAS, "Received MBS container: an MBS TAI list is not decoded, stopping after %d entrie(s)\n", out->num);
++      return pos;
++    }
++    if (msai == 2) {
++      if (pos >= length) {
++        LOG_E(NAS, "Received MBS container: NR CGI list runs past the IE\n");
++        return -1;
++      }
++      pos += 1 + buffer[pos]; /* Length of NR CGI list contents, then the list */
++    }
++
++    /* MBS timers: 6 octets of MBS start time, or one octet of back-off timer */
++    if (mti == 1)
++      pos += 6;
++    else if (mti == 2)
++      pos += 1;
++
++    /* MBS security container: a count, then 43 octets per MBS security keys set (figure
++     * 9.11.4.31.11: MTKI flag, Key domain ID, MSK ID, MSK, MTK ID, Encrypted MTK). */
++    if (msci) {
++      if (pos >= length) {
++        LOG_E(NAS, "Received MBS container: security container runs past the IE\n");
++        return -1;
++      }
++      pos += 1 + (uint32_t)buffer[pos] * 43;
++    }
++
++    if (pos > length) {
++      LOG_E(NAS, "Received MBS container: an entry's optional fields run past the IE\n");
++      return -1;
++    }
++  }
++
++  return pos;
++}
++
++const char *mbs_decision_text(mbs_decision_t decision)
++{
++  switch (decision) {
++    case MBS_DECISION_SERVICE_AREA_UPDATE: return "MBS service area update";
++    case MBS_DECISION_JOIN_ACCEPTED: return "MBS join is accepted";
++    case MBS_DECISION_JOIN_REJECTED: return "MBS join is rejected";
++    case MBS_DECISION_REMOVE_UE: return "Remove UE from multicast MBS session";
++    case MBS_DECISION_SECURITY_UPDATE: return "MBS security information update";
++    default: return "unknown";
++  }
++}
++
++const char *mbs_reject_cause_text(mbs_reject_cause_t cause)
++{
++  switch (cause) {
++    case MBS_REJECT_NO_INFO: return "no additional information provided";
++    case MBS_REJECT_INSUFFICIENT_RESOURCES: return "insufficient resources";
++    case MBS_REJECT_NOT_AUTHORIZED: return "user is not authorized to use MBS service";
++    case MBS_REJECT_NOT_STARTED: return "multicast MBS session has not started or will not start soon";
++    case MBS_REJECT_OUTSIDE_SERVICE_AREA: return "user is outside of local MBS service area";
++    case MBS_REJECT_CONTEXT_NOT_FOUND: return "session context not found";
++    case MBS_REJECT_SESSION_RELEASED: return "multicast MBS session is released";
++    default: return "unknown";
++  }
++}
++
++bool mbs_tmgi_from_string(const char *in, uint8_t *out)
++{
++  if (!in || !out)
++    return false;
++  if (strlen(in) != 2 * MBS_TMGI_LEN)
++    return false;
++
++  for (int i = 0; i < MBS_TMGI_LEN; i++) {
++    char hi = in[2 * i], lo = in[2 * i + 1];
++    if (!isxdigit((unsigned char)hi) || !isxdigit((unsigned char)lo))
++      return false;
++    out[i] = (uint8_t)((isdigit((unsigned char)hi) ? hi - '0' : (tolower((unsigned char)hi) - 'a' + 10)) << 4);
++    out[i] |= (uint8_t)(isdigit((unsigned char)lo) ? lo - '0' : (tolower((unsigned char)lo) - 'a' + 10));
++  }
++
++  return true;
++}
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.h b/openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.h
+new file mode 100644
+index 000000000..766a5d329
+--- /dev/null
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/MbsContainers.h
+@@ -0,0 +1,92 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++/*!
++ * \brief The two MBS containers a UE exchanges with the SMF to join or leave a multicast MBS
++ *        session: the Requested MBS container it sends (TS 24.501 clause 9.11.4.30) and the
++ *        Received MBS container it gets back (clause 9.11.4.31).
++ */
++
++#ifndef MBS_CONTAINERS_H_
++#define MBS_CONTAINERS_H_
++
++#include <stdint.h>
++#include <stdbool.h>
++
++/* A TMGI is 6 octets: 3 of MBS Service ID then the PLMN, "coded as described in clause 10.5.6.13 in
++ * 3GPP TS 24.008 starting from octet 2" (TS 24.501 clause 9.11.4.30 table 9.11.4.30.1). */
++#define MBS_TMGI_LEN 6
++
++/* How many multicast MBS sessions one container may carry, here. The IE itself allows more. */
++#define MBS_MAX_SESSIONS 4
++
++/* Type of multicast MBS session ID, TS 24.501 clause 9.11.4.30 (bits 1 to 2 of octet 4) */
++typedef enum {
++  MBS_SESSION_ID_TMGI = 1,
++  MBS_SESSION_ID_SSM_IPV4 = 2,
++  MBS_SESSION_ID_SSM_IPV6 = 3,
++} mbs_session_id_type_t;
++
++/* MBS operation, same clause (bits 3 to 4 of octet 4) */
++typedef enum {
++  MBS_OP_JOIN = 1,
++  MBS_OP_LEAVE = 2,
++} mbs_operation_t;
++
++/* MBS decision, TS 24.501 clause 9.11.4.31 (bits 1 to 3 of octet 4) */
++typedef enum {
++  MBS_DECISION_SERVICE_AREA_UPDATE = 1,
++  MBS_DECISION_JOIN_ACCEPTED = 2,
++  MBS_DECISION_JOIN_REJECTED = 3,
++  MBS_DECISION_REMOVE_UE = 4,
++  MBS_DECISION_SECURITY_UPDATE = 5,
++} mbs_decision_t;
++
++/* Rejection cause, same clause (bits 6 to 8 of octet 4) */
++typedef enum {
++  MBS_REJECT_NO_INFO = 0,
++  MBS_REJECT_INSUFFICIENT_RESOURCES = 1,
++  MBS_REJECT_NOT_AUTHORIZED = 2,
++  MBS_REJECT_NOT_STARTED = 3,
++  MBS_REJECT_OUTSIDE_SERVICE_AREA = 4,
++  MBS_REJECT_CONTEXT_NOT_FOUND = 5,
++  MBS_REJECT_SESSION_RELEASED = 6,
++} mbs_reject_cause_t;
++
++/* One "multicast MBS session information" of a Requested MBS container. Only the TMGI form is
++ * produced: it is what a service announcement gives and what the MB-SMF indexes a session by. */
++typedef struct {
++  mbs_operation_t operation;
++  uint8_t tmgi[MBS_TMGI_LEN];
++} requested_mbs_info_t;
++
++/* One "Received MBS information" of a Received MBS container. Only the fields the UE acts on are
++ * kept; the service area, the timers and the security container are skipped over. */
++typedef struct {
++  mbs_decision_t decision;
++  mbs_reject_cause_t reject_cause;
++  uint8_t tmgi[MBS_TMGI_LEN];
++} received_mbs_info_t;
++
++typedef struct {
++  uint8_t num;
++  received_mbs_info_t info[MBS_MAX_SESSIONS];
++} received_mbs_container_t;
++
++/** @brief Encode the contents of a Requested MBS container (without IEI and length) into \p buffer.
++ *  Returns the number of octets written, or -1 if \p size is too small. */
++int encode_requested_mbs_container(uint8_t *buffer, uint32_t size, const requested_mbs_info_t *info, int num);
++
++/** @brief Decode the contents of a Received MBS container (without IEI and length).
++ *  Returns the number of octets consumed, or -1 when the container is malformed. */
++int decode_received_mbs_container(received_mbs_container_t *out, const uint8_t *buffer, uint32_t length);
++
++/** @brief The human-readable name of a decision / rejection cause, for logs. */
++const char *mbs_decision_text(mbs_decision_t decision);
++const char *mbs_reject_cause_text(mbs_reject_cause_t cause);
++
++/** @brief Parse 12 hex characters into a 6-octet TMGI. Returns false when \p in is not that. */
++bool mbs_tmgi_from_string(const char *in, uint8_t *out);
++
++#endif /* MBS_CONTAINERS_H_ */
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.c b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.c
+index b9dfe078b..62b62a9bc 100644
+--- a/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.c
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.c
+@@ -110,6 +110,24 @@ int decode_pdu_session_modification_command(pdu_session_modification_command_msg
+         break;
+       }
+ 
++      case IEI_MOD_RECEIVED_MBS_CONTAINER: {
++        /* Type 6 IE (TLV-E): two octets of length, then the Received MBS informations. */
++        uint16_t mbs_length = 0;
++        GET_SHORT(curPtr, mbs_length);
++        curPtr += sizeof(mbs_length);
++        if (curPtr + mbs_length > buffer + msg_length) {
++          LOG_E(NAS, "Received MBS container of %u octets runs past the message\n", mbs_length);
++          return -1;
++        }
++        if (decode_received_mbs_container(&psmc_msg->received_mbs, curPtr, mbs_length) < 0) {
++          LOG_E(NAS, "Could not decode the Received MBS container\n");
++          return -1;
++        }
++        psmc_msg->received_mbs_present = true;
++        curPtr += mbs_length;
++        break;
++      }
++
+       default:
+         LOG_W(NAS, "PDU SESSION MODIFICATION COMMAND - Unknown IEI 0x%02x\n", psmc_iei);
+         return -1;
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.h b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.h
+index 460ddd21d..d456b0de1 100644
+--- a/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.h
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationCommand.h
+@@ -9,6 +9,7 @@
+ #include <stdbool.h>
+ #include "fgs_nas_utils.h"
+ #include "fgsm_lib.h"
++#include "MbsContainers.h"
+ 
+ /* PDU Session Modification Command Optional IE Identifiers - TS 24.501 Table 8.3.9.1.1 */
+ 
+@@ -20,7 +21,8 @@
+   IEI_DEF(IEI_MOD_AUTH_QOS_RULES, 0x7A) /* QoS rules 9.11.4.13 */                     \
+   IEI_DEF(IEI_MOD_MAPPED_EPS, 0x75) /* Mapped EPS bearer contexts */                  \
+   IEI_DEF(IEI_MOD_AUTH_QOS_DESC, 0x79) /* QoS flow descriptions 9.11.4.12 */          \
+-  IEI_DEF(IEI_MOD_EXT_CONF_OPT, 0x7B) /* Extended protocol config options */
++  IEI_DEF(IEI_MOD_EXT_CONF_OPT, 0x7B) /* Extended protocol config options */                \
++  IEI_DEF(IEI_MOD_RECEIVED_MBS_CONTAINER, 0x71) /* Received MBS container 9.11.4.31 */
+ 
+ static const text_info_t mod_iei_text_desc[] = {FOREACH_MOD_IEI(TO_TEXT)};
+ 
+@@ -43,6 +45,10 @@ typedef struct pdu_session_modification_command_msg_s {
+   // Extended Protocol Configuration Options (O)
+   ext_pP_t ext_pp_ie;
+   bool ext_pp_present;
++  // Received MBS container (O): what the network decided about the multicast MBS sessions the UE
++  // asked to join or leave (TS 24.501 clause 6.3.2.3)
++  received_mbs_container_t received_mbs;
++  bool received_mbs_present;
+ } pdu_session_modification_command_msg_t;
+ 
+ int decode_pdu_session_modification_command(pdu_session_modification_command_msg_t *psmc_msg,
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.c b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.c
+new file mode 100644
+index 000000000..a3bca4a6e
+--- /dev/null
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.c
+@@ -0,0 +1,49 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++#include "PduSessionModificationRequest.h"
++#include <string.h>
++#include "common/utils/LOG/log.h"
++
++/**
++ * @brief PDU session modification request (8.3.7 of 3GPP TS 24.501)
++ *        UE to network
++ *
++ * The Requested MBS container is a type 6 information element (clause 9.11.4.30), i.e. TLV-E: one
++ * octet of IEI, two of length, then the contents.
++ */
++int encode_pdu_session_modification_request(const pdu_session_modification_request_msg *msg, uint8_t *buffer, uint32_t len)
++{
++  uint32_t encoded = 0;
++
++  if (len < 4) {
++    LOG_E(NAS, "PDU Session Modification Request does not fit in %u octets\n", len);
++    return -1;
++  }
++
++  buffer[encoded++] = msg->protocoldiscriminator;
++  buffer[encoded++] = msg->pdusessionid;
++  buffer[encoded++] = msg->pti;
++  buffer[encoded++] = msg->pdusessionmodificationrequestmsgtype;
++
++  if (msg->requested_mbs_present) {
++    uint8_t contents[MBS_MAX_SESSIONS * (1 + MBS_TMGI_LEN)];
++    int contents_len = encode_requested_mbs_container(contents, sizeof(contents), msg->requested_mbs, msg->num_requested_mbs);
++
++    if (contents_len < 0)
++      return -1;
++    if (encoded + 3 + (uint32_t)contents_len > len) {
++      LOG_E(NAS, "Requested MBS container does not fit in %u octets\n", len);
++      return -1;
++    }
++
++    buffer[encoded++] = IEI_MODREQ_REQUESTED_MBS_CONTAINER;
++    buffer[encoded++] = (uint8_t)((contents_len >> 8) & 0xff);
++    buffer[encoded++] = (uint8_t)(contents_len & 0xff);
++    memcpy(buffer + encoded, contents, contents_len);
++    encoded += contents_len;
++  }
++
++  return encoded;
++}
+diff --git a/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.h b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.h
+new file mode 100644
+index 000000000..0f0188fb4
+--- /dev/null
++++ b/openair3/NAS/NR_UE/5GS/5GSM/MSG/PduSessionModificationRequest.h
+@@ -0,0 +1,44 @@
++/*
++ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
++ */
++
++/*!
++ * \brief PDU session modification request procedures
++ */
++
++#ifndef PDU_SESSION_MODIFICATION_REQUEST_H_
++#define PDU_SESSION_MODIFICATION_REQUEST_H_
++
++#include <stdint.h>
++#include <stdbool.h>
++#include "MessageType.h"
++#include "MbsContainers.h"
++
++/* PDU Session Modification Request optional IE identifiers, TS 24.501 table 8.3.7.1.1. Only the one
++ * this build sends is listed; the rest are added as they are needed. */
++#define IEI_MODREQ_REQUESTED_MBS_CONTAINER 0x70 /* Requested MBS container 9.11.4.30, TLV-E */
++
++/*
++ * Message name: PDU session modification request
++ * Description: sent by the UE to request a modification of a PDU session.
++ *              See table 8.3.7.1.1 of 3GPP TS 24.501.
++ * Significance: dual
++ * Direction: UE to network
++ */
++typedef struct pdu_session_modification_request_msg_tag {
++  /* Mandatory fields */
++  uint8_t protocoldiscriminator;
++  uint8_t pdusessionid;
++  uint8_t pti;
++  MessageType pdusessionmodificationrequestmsgtype;
++  /* Optional: Requested MBS container (join or leave one or more multicast MBS sessions) */
++  bool requested_mbs_present;
++  uint8_t num_requested_mbs;
++  requested_mbs_info_t requested_mbs[MBS_MAX_SESSIONS];
++} pdu_session_modification_request_msg;
++
++/** @brief Encode a PDU Session Modification Request into \p buffer of \p len octets.
++ *  Returns the number of octets written, or -1 on failure. */
++int encode_pdu_session_modification_request(const pdu_session_modification_request_msg *msg, uint8_t *buffer, uint32_t len);
++
++#endif /* PDU_SESSION_MODIFICATION_REQUEST_H_ */
+diff --git a/openair3/NAS/NR_UE/5GS/tests/nas_lib_test.c b/openair3/NAS/NR_UE/5GS/tests/nas_lib_test.c
+index 858ab8b98..4c2180252 100644
+--- a/openair3/NAS/NR_UE/5GS/tests/nas_lib_test.c
++++ b/openair3/NAS/NR_UE/5GS/tests/nas_lib_test.c
+@@ -17,6 +17,9 @@
+ #include "FGSNASSecurityModeReject.h"
+ #include "fgmm_authentication_reject.h"
+ #include "nr_nas_msg.h"
++#include "MbsContainers.h"
++#include "PduSessionModificationRequest.h"
++#include "PduSessionModificationCommand.h"
+ 
+ configmodule_interface_t *uniqCfg = NULL;
+ 
+@@ -486,6 +489,141 @@ static void test_msg_headers(void)
+   AssertFatal(decode_5gsm_msg_header(&sm_header, sm, sizeof(sm) - 1) < 0, "decode_5gsm_msg_header() accepted a truncated header\n");
+ }
+ 
++/** @brief The Requested MBS container the UE sends to join a multicast MBS session
++ *         (TS 24.501 clause 9.11.4.30), and the whole PDU Session Modification Request around it
++ *         (clause 8.3.7). Checked against the octets the clause prescribes, because the SMF decodes
++ *         them by offset and a wrong bit order is not visible in any log. */
++static void test_mbs_join_request(void)
++{
++  requested_mbs_info_t info = {.operation = MBS_OP_JOIN, .tmgi = {0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07}};
++  uint8_t buf[64] = {0};
++
++  /* octet 4: bits 1-2 = ID type 01 (TMGI), bits 3-4 = operation 01 (join) -> 0x05 */
++  int len = encode_requested_mbs_container(buf, sizeof(buf), &info, 1);
++  AssertFatal(len == 7, "Requested MBS container: expected 7 octets, got %d\n", len);
++  AssertFatal(buf[0] == 0x05, "Requested MBS container: octet 4 is 0x%02x, expected 0x05\n", buf[0]);
++  AssertFatal(memcmp(buf + 1, info.tmgi, MBS_TMGI_LEN) == 0, "Requested MBS container: wrong TMGI\n");
++
++  /* a leave is operation 10 -> 0x09 */
++  info.operation = MBS_OP_LEAVE;
++  AssertFatal(encode_requested_mbs_container(buf, sizeof(buf), &info, 1) == 7, "encode failed\n");
++  AssertFatal(buf[0] == 0x09, "Requested MBS container: a leave is 0x%02x, expected 0x09\n", buf[0]);
++
++  /* it refuses to write past the buffer rather than truncating the IE */
++  AssertFatal(encode_requested_mbs_container(buf, 6, &info, 1) == -1, "encode accepted a short buffer\n");
++
++  /* the whole message: 4 octets of 5GSM header, then the container as a type 6 IE (IEI, 2 octets of
++   * length, contents) */
++  pdu_session_modification_request_msg msg = {
++      .protocoldiscriminator = FGS_SESSION_MANAGEMENT_MESSAGE,
++      .pdusessionid = 1,
++      .pti = 1,
++      .pdusessionmodificationrequestmsgtype = FGS_PDU_SESSION_MODIFICATION_REQ,
++      .requested_mbs_present = true,
++      .num_requested_mbs = 1,
++  };
++  msg.requested_mbs[0].operation = MBS_OP_JOIN;
++  memcpy(msg.requested_mbs[0].tmgi, info.tmgi, MBS_TMGI_LEN);
++
++  const uint8_t expected[] = {
++      FGS_SESSION_MANAGEMENT_MESSAGE, 1, 1, FGS_PDU_SESSION_MODIFICATION_REQ,
++      0x70, 0x00, 0x07,
++      0x05, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07,
++  };
++  len = encode_pdu_session_modification_request(&msg, buf, sizeof(buf));
++  AssertFatal(len == (int)sizeof(expected), "Modification Request: %d octets, expected %zu\n", len, sizeof(expected));
++  AssertFatal(memcmp(buf, expected, sizeof(expected)) == 0, "Modification Request: encoding mismatch\n");
++}
++
++/** @brief The Received MBS container the SMF answers with (TS 24.501 clause 9.11.4.31), decoded out
++ *         of a PDU Session Modification Command. */
++static void test_mbs_join_answer(void)
++{
++  received_mbs_container_t out = {0};
++
++  /* accepted: MD = 010, nothing optional */
++  {
++    const uint8_t buf[] = {0x02, 0x00, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07};
++    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
++    AssertFatal(out.num == 1, "expected 1 entry, got %d\n", out.num);
++    AssertFatal(out.info[0].decision == MBS_DECISION_JOIN_ACCEPTED, "expected accepted, got %d\n", out.info[0].decision);
++    AssertFatal(memcmp(out.info[0].tmgi, buf + 2, MBS_TMGI_LEN) == 0, "wrong TMGI\n");
++  }
++
++  /* rejected with "session context not found": MD = 011, cause = 101 in bits 6-8 */
++  {
++    const uint8_t buf[] = {(5 << 5) | 3, 0x00, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07};
++    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
++    AssertFatal(out.info[0].decision == MBS_DECISION_JOIN_REJECTED, "expected rejected\n");
++    AssertFatal(out.info[0].reject_cause == MBS_REJECT_CONTEXT_NOT_FOUND, "wrong rejection cause\n");
++  }
++
++  /* two entries back to back */
++  {
++    const uint8_t buf[] = {
++        0x02, 0x00, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07,
++        (2 << 5) | 3, 0x00, 0x00, 0x00, 0x02, 0x99, 0xf9, 0x07,
++    };
++    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
++    AssertFatal(out.num == 2, "expected 2 entries, got %d\n", out.num);
++    AssertFatal(out.info[1].reject_cause == MBS_REJECT_NOT_AUTHORIZED, "wrong rejection cause\n");
++    AssertFatal(out.info[1].tmgi[2] == 0x02, "wrong TMGI in the second entry\n");
++  }
++
++  /* the optional fields are skipped over, so the entry after them is still found: IPAE=1 with IPv4
++   * (8 octets of addresses) and an MBS back-off timer (MTI=10, 1 octet) */
++  {
++    const uint8_t buf[] = {
++        0x02, 0x01 | (2 << 1), 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07,
++        192, 168, 77, 20, 239, 0, 0, 25,
++        0x3c,
++        0x02, 0x00, 0x00, 0x00, 0x02, 0x99, 0xf9, 0x07,
++    };
++    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == (int)sizeof(buf), "decode failed\n");
++    AssertFatal(out.num == 2, "expected 2 entries past the optional fields, got %d\n", out.num);
++    AssertFatal(out.info[1].tmgi[2] == 0x02, "wrong TMGI in the second entry\n");
++  }
++
++  /* a truncated entry is a malformed IE, not a short read */
++  {
++    const uint8_t buf[] = {0x02, 0x00, 0xab, 0xcd};
++    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == -1, "a truncated container was accepted\n");
++  }
++
++  /* an entry whose optional fields run past the IE is refused too */
++  {
++    const uint8_t buf[] = {0x02, 0x01, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07, 1, 2};
++    AssertFatal(decode_received_mbs_container(&out, buf, sizeof(buf)) == -1, "an overrunning container was accepted\n");
++  }
++
++  /* and the IE in its message: a PDU Session Modification Command whose only IE is 0x71 */
++  {
++    const uint8_t cmd[] = {0x71, 0x00, 0x08, 0x02, 0x00, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07};
++    pdu_session_modification_command_msg_t msg = {0};
++    AssertFatal(decode_pdu_session_modification_command(&msg, (uint8_t *)cmd, sizeof(cmd)) == (int)sizeof(cmd),
++                "decode_pdu_session_modification_command() failed\n");
++    AssertFatal(msg.received_mbs_present, "the Received MBS container was not reported\n");
++    AssertFatal(msg.received_mbs.num == 1 && msg.received_mbs.info[0].decision == MBS_DECISION_JOIN_ACCEPTED,
++                "the Received MBS container was not decoded\n");
++  }
++}
++
++/** @brief --mbs-join takes 12 hex characters of TMGI, of either case. */
++static void test_mbs_tmgi_from_string(void)
++{
++  uint8_t tmgi[MBS_TMGI_LEN] = {0};
++  const uint8_t expected[MBS_TMGI_LEN] = {0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07};
++
++  AssertFatal(mbs_tmgi_from_string("abcdef99f907", tmgi), "a lowercase TMGI was refused\n");
++  AssertFatal(memcmp(tmgi, expected, MBS_TMGI_LEN) == 0, "wrong octets from a lowercase TMGI\n");
++  AssertFatal(mbs_tmgi_from_string("ABCDEF99F907", tmgi), "an uppercase TMGI was refused\n");
++  AssertFatal(memcmp(tmgi, expected, MBS_TMGI_LEN) == 0, "wrong octets from an uppercase TMGI\n");
++  AssertFatal(!mbs_tmgi_from_string("abcdef99f90", tmgi), "a short TMGI was accepted\n");
++  AssertFatal(!mbs_tmgi_from_string("abcdef99f9077", tmgi), "a long TMGI was accepted\n");
++  AssertFatal(!mbs_tmgi_from_string("abcdef99f90g", tmgi), "a non-hex TMGI was accepted\n");
++  AssertFatal(!mbs_tmgi_from_string(NULL, tmgi), "NULL was accepted\n");
++}
++
+ int main()
+ {
+   // Initialize logging system
+@@ -502,5 +640,8 @@ int main()
+   test_auth_reject();
+   test_security_mode_reject();
+   test_msg_headers();
++  test_mbs_join_request();
++  test_mbs_join_answer();
++  test_mbs_tmgi_from_string();
+   return 0;
+ }
+diff --git a/openair3/NAS/NR_UE/nr_nas_msg.c b/openair3/NAS/NR_UE/nr_nas_msg.c
+index 9fbefceeb..d50b2f0a3 100644
+--- a/openair3/NAS/NR_UE/nr_nas_msg.c
++++ b/openair3/NAS/NR_UE/nr_nas_msg.c
+@@ -28,6 +28,7 @@
+ #include "PduSessionEstablishmentAccept.h"
+ #include "PduSessionModificationCommand.h"
+ #include "PduSessionModificationComplete.h"
++#include "PduSessionModificationRequest.h"
+ #include "RegistrationAccept.h"
+ #include "SORTransparentContainer.h"
+ #include "FGSIdentityResponse.h"
+@@ -813,6 +814,9 @@ static void derive_ue_keys(uint8_t *buf, nr_ue_nas_t *nas)
+   printf("\n");
+ }
+ 
++/* Defined further down, next to the join itself; used as soon as a PDU session comes up. */
++static void nr_nas_mbs_join_if_requested(nr_ue_nas_t *nas, uint8_t pdu_session_id);
++
+ nr_ue_nas_t *get_ue_nas_info(module_id_t module_id)
+ {
+   AssertFatal(module_id < MAX_NUM_NR_UE_INST, "Invalid module_id %d\n", module_id);
+@@ -1869,6 +1873,9 @@ static void handle_pdu_session_accept(nr_ue_nas_t *nas, uint8_t *pdu_buffer, uin
+   }
+   /* Track active PDU session for later PDU session status IE (24.501 8.2.16.3) */
+   nas->psi_status[sm_header.pdu_session_id] = PDU_SESSION_ACTIVE;
++
++  /* With a PDU session up, the UE can ask to join a multicast MBS session over it. */
++  nr_nas_mbs_join_if_requested(nas, sm_header.pdu_session_id);
+   // ask RRC to start connected reader for this PSI
+   if (t->sock > 0)
+     send_nas_tun_req(nas, sm_header.pdu_session_id);
+@@ -1968,6 +1975,137 @@ static void generatePduSessionModificationComplete(nr_ue_nas_t *nas,
+   }
+ }
+ 
++/**
++ * @brief Ask to join a multicast MBS session: a PDU Session Modification Request carrying a
++ *        Requested MBS container, sent on an existing PDU session.
++ *
++ * TS 23.247 V18.8.0 clause 7.2.1.3 step 1: "if there is an existing PDU session that can be used to
++ * send the UE join request for the multicast MBS Session, the UE sends a PDU Session Modification
++ * Request over that PDU session (i.e. associated PDU Session) which additionally contains one or
++ * several MBS Session ID(s) and join request."
++ *
++ * The wrapping into a security-protected UL NAS TRANSPORT is the same as
++ * generatePduSessionModificationComplete() above; only the 5GSM payload differs.
++ */
++static void generateMbsJoinRequest(nr_ue_nas_t *nas, as_nas_info_t *responseMsg, uint8_t pdu_session_id, const uint8_t *tmgi)
++{
++  int size = 0;
++
++  pdu_session_modification_request_msg req = {0};
++  req.protocoldiscriminator = FGS_SESSION_MANAGEMENT_MESSAGE;
++  req.pdusessionid = pdu_session_id;
++  /* A UE-requested procedure needs its own PTI (TS 24.501 clause 6.3.2.1); 1 is enough while only
++   * one such procedure is ever outstanding in this UE. */
++  req.pti = 1;
++  req.pdusessionmodificationrequestmsgtype = FGS_PDU_SESSION_MODIFICATION_REQ;
++  req.requested_mbs_present = true;
++  req.num_requested_mbs = 1;
++  req.requested_mbs[0].operation = MBS_OP_JOIN;
++  memcpy(req.requested_mbs[0].tmgi, tmgi, MBS_TMGI_LEN);
++
++  uint8_t req_buffer[4 + 3 + MBS_MAX_SESSIONS * (1 + MBS_TMGI_LEN)];
++  int req_length = encode_pdu_session_modification_request(&req, req_buffer, sizeof(req_buffer));
++  if (req_length < 0) {
++    LOG_E(NAS, "Could not encode the PDU Session Modification Request of the MBS join\n");
++    return;
++  }
++
++  nas_stream_cipher_t stream_cipher = {0};
++  uint8_t mac[NAS_INTEGRITY_SIZE];
++
++  // 5GMM security protected message
++  fgmm_nas_msg_security_protected_t sp_msg = {0};
++  fgs_nas_message_security_header_t *sp_header = &sp_msg.header;
++  sp_header->protocol_discriminator = FGS_MOBILITY_MANAGEMENT_MESSAGE;
++  sp_header->security_header_type = INTEGRITY_PROTECTED_AND_CIPHERED;
++  sp_header->sequence_number = nas->security.nas_count_ul & 0xff;
++
++  size += 7;
++
++  fgmm_nas_message_plain_t *plain = &sp_msg.plain;
++
++  plain->header = set_mm_header(FGS_UPLINK_NAS_TRANSPORT, PLAIN_5GS_MSG);
++  size += sizeof(plain->header);
++
++  fgs_uplink_nas_transport_msg *mm_msg = &plain->mm_msg.uplink_nas_transport;
++  mm_msg->payloadcontainertype.type = 1;
++  size += 1;
++  mm_msg->fgspayloadcontainer.payloadcontainercontents.length = req_length;
++  mm_msg->fgspayloadcontainer.payloadcontainercontents.value = req_buffer;
++  size += (2 + req_length);
++  mm_msg->pdusessionid = pdu_session_id;
++  size += 2;
++
++  responseMsg->nas_data = malloc_or_fail(size * sizeof(*responseMsg->nas_data));
++  int security_header_len = nas_protected_security_header_encode(responseMsg->nas_data, sp_header, size);
++
++  responseMsg->length =
++      security_header_len
++      + mm_msg_encode(plain, (uint8_t *)(responseMsg->nas_data + security_header_len), size - security_header_len);
++
++  /* ciphering */
++  uint8_t buf[responseMsg->length - 7];
++  stream_cipher.context = nas->security_container->ciphering_context;
++  AssertFatal(nas->security.nas_count_ul <= 0xffffff, "fatal: NAS COUNT UL too big (todo: fix that)\n");
++  stream_cipher.count = nas->security.nas_count_ul;
++  stream_cipher.bearer = 1;
++  stream_cipher.message = (unsigned char *)(responseMsg->nas_data + 7);
++  stream_cipher.blength = (responseMsg->length - 7) << 3;
++  stream_compute_encrypt(nas->security_container->ciphering_algorithm, &stream_cipher, buf);
++  memcpy(stream_cipher.message, buf, responseMsg->length - 7);
++
++  /* integrity protection */
++  stream_cipher.context = nas->security_container->integrity_context;
++  stream_cipher.count = nas->security.nas_count_ul++;
++  stream_cipher.bearer = 1;
++  stream_cipher.message = (unsigned char *)(responseMsg->nas_data + 6);
++  stream_cipher.blength = (responseMsg->length - 6) << 3;
++  stream_compute_integrity(nas->security_container->integrity_algorithm, &stream_cipher, mac);
++
++  for (int i = 0; i < 4; i++)
++    responseMsg->nas_data[2 + i] = mac[i];
++}
++
++/**
++ * @brief Send the MBS join of --mbs-join, once a PDU session it can ride on is up.
++ *
++ * Called when a PDU session becomes active. The join waits for that on purpose: clause 7.2.1.3 step 1
++ * needs "an existing PDU session that can be used to send the UE join request", and a UE that has
++ * only just registered has none.
++ */
++static void nr_nas_mbs_join_if_requested(nr_ue_nas_t *nas, uint8_t pdu_session_id)
++{
++  uint8_t tmgi[MBS_TMGI_LEN];
++
++  if (nas->mbs_join_tmgi == NULL || nas->mbs_join_sent)
++    return;
++
++  if (!mbs_tmgi_from_string(nas->mbs_join_tmgi, tmgi)) {
++    LOG_E(NAS, "--mbs-join %s is not 12 hex characters, no MBS join is sent\n", nas->mbs_join_tmgi);
++    nas->mbs_join_sent = true; /* complaining once is enough */
++    return;
++  }
++
++  if (nas->security_container == NULL) {
++    LOG_E(NAS, "No NAS security context, cannot send the MBS join\n");
++    return;
++  }
++
++  as_nas_info_t join_msg = {0};
++  generateMbsJoinRequest(nas, &join_msg, pdu_session_id, tmgi);
++  if (join_msg.length == 0) {
++    LOG_E(NAS, "Could not build the MBS join request\n");
++    return;
++  }
++
++  send_nas_uplink_data_req(nas, &join_msg);
++  nas->mbs_join_sent = true;
++  LOG_A(NAS,
++        "MBS: asked to join multicast session TMGI %s on PDU session %d\n",
++        nas->mbs_join_tmgi,
++        pdu_session_id);
++}
++
+ /**
+  * @brief Handle PDU Session Modification Command
+  */
+@@ -2137,6 +2275,34 @@ static void handle_pdu_session_modification_command(nr_ue_nas_t *nas, uint8_t *p
+     LOG_I(NAS, "PDU session %d: 5GSM cause: 0x%02x\n", sm_header.pdu_session_id, msg.cause);
+   }
+ 
++  /* What the network decided about the MBS sessions this UE asked to join (TS 24.501 clause 6.3.2.3:
++   * "If the PDU SESSION MODIFICATION COMMAND message includes the Received MBS container IE, for each
++   * of the Received MBS informations"). Acting on it -- a multicast MRB, a G-RNTI -- is the radio
++   * work; what the UE does today is say what it was told. */
++  if (msg.received_mbs_present) {
++    for (int i = 0; i < msg.received_mbs.num; i++) {
++      const received_mbs_info_t *info = &msg.received_mbs.info[i];
++      char tmgi[2 * MBS_TMGI_LEN + 1] = {0};
++
++      for (int j = 0; j < MBS_TMGI_LEN; j++)
++        snprintf(tmgi + 2 * j, 3, "%02x", info->tmgi[j]);
++
++      if (info->decision == MBS_DECISION_JOIN_REJECTED || info->decision == MBS_DECISION_REMOVE_UE)
++        LOG_A(NAS,
++              "MBS: PDU session %d, multicast session TMGI %s: %s (%s)\n",
++              sm_header.pdu_session_id,
++              tmgi,
++              mbs_decision_text(info->decision),
++              mbs_reject_cause_text(info->reject_cause));
++      else
++        LOG_A(NAS,
++              "MBS: PDU session %d, multicast session TMGI %s: %s\n",
++              sm_header.pdu_session_id,
++              tmgi,
++              mbs_decision_text(info->decision));
++    }
++  }
++
+   // Send PDU Session Modification Complete response
+   as_nas_info_t response_msg = {0};
+   generatePduSessionModificationComplete(nas, &response_msg, sm_header.pdu_session_id, sm_header.pti);
+@@ -2979,3 +3145,9 @@ void nas_init_nrue(int num_ues) {
+     (void)get_ue_nas_info(i);
+   }
+ }
++
++void nas_set_mbs_join(int ue_id, const char *tmgi)
++{
++  nr_ue_nas_t *nas = get_ue_nas_info(ue_id);
++  nas->mbs_join_tmgi = tmgi;
++}
+diff --git a/openair3/NAS/NR_UE/nr_nas_msg.h b/openair3/NAS/NR_UE/nr_nas_msg.h
+index a8d862350..138387013 100644
+--- a/openair3/NAS/NR_UE/nr_nas_msg.h
++++ b/openair3/NAS/NR_UE/nr_nas_msg.h
+@@ -83,6 +83,10 @@ typedef struct {
+   /* Active PDU sessions for PDU session status IE (TS 24.501 8.2.16.3 / 9.11.3.44) */
+   uint8_t psi_status[MAX_NUM_PSI]; /* index 0 is spare */
+   nas_ue_pdu_tun_t pdu_tun[MAX_NUM_PSI];
++  /* --mbs-join: the TMGI of the multicast MBS session this UE is to join, as 12 hex characters, or
++   * NULL. The join is sent once a PDU session it can ride on is up, and only once. */
++  const char *mbs_join_tmgi;
++  bool mbs_join_sent;
+ } nr_ue_nas_t;
+ 
+ nr_ue_nas_t *get_ue_nas_info(module_id_t module_id);
+@@ -91,6 +95,9 @@ void generateServiceRequest(as_nas_info_t *initialNasMsg, nr_ue_nas_t *nas, bool
+ void *nas_nrue_task(void *args_p);
+ void *nas_nrue(void *args_p);
+ void nas_init_nrue(int num_ues);
++/** @brief Ask UE \p ue_id to join the multicast MBS session of this TMGI (12 hex characters) once it
++ *  has a PDU session. NULL, the default, joins nothing. The string is not copied. */
++void nas_set_mbs_join(int ue_id, const char *tmgi);
+ int nas_itti_kgnb_refresh_req(instance_t instance, const uint8_t kgnb[32]);
+ void request_pdusession(nr_ue_nas_t *nas, const pdu_session_config_t *pdu);
+ nr_ue_nas_t *get_nr_ue_nas_info(int ue_inst);

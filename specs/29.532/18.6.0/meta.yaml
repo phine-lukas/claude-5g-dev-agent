@@ -1,0 +1,12 @@
+id: '29.532'
+title: Nmbsmf MBS session management
+official_title: ''
+version: 18.6.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/29_series/29.532/29532-i60.zip
+archive: 29532-i60.zip
+sha256: f5ebdca871e02dfeb4ce56518667eabd2b8da039145d60a5582035b3cd43cb86
+converted: '2026-11-19'
+documents: 1
+clause_files: 12
+asn1_blocks: 0

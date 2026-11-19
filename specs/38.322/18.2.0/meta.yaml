@@ -1,0 +1,12 @@
+id: '38.322'
+title: NR RLC
+official_title: NR; Radio Link Control (RLC) protocol specification
+version: 18.2.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.322/38322-i20.zip
+archive: 38322-i20.zip
+sha256: ce65f1a5a87a49128ab1347d304dd379a78721ac4ec66fae1e7e0dc20d3e492b
+converted: '2026-11-19'
+documents: 1
+clause_files: 8
+asn1_blocks: 0

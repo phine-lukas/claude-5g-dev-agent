@@ -1,0 +1,12 @@
+id: '23.247'
+title: 5G MBS architecture
+official_title: ''
+version: 18.8.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/23_series/23.247/23247-i80.zip
+archive: 23247-i80.zip
+sha256: fe017b64a35e6778af96abefa23264b0df1191ee9eea21b37d4ac1b403daaed7
+converted: '2026-11-19'
+documents: 1
+clause_files: 15
+asn1_blocks: 0

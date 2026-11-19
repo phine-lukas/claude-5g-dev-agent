@@ -1,0 +1,681 @@
+From 00ac767a00e8c2dc2b3b478ce1961156b8df9ec9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 17:00:13 +0000
+Subject: [PATCH] Check the multicast join over N2 in MBS-MC-02
+
+Replace the MBS-MC-02 stub with a check of the signalling half of the
+requirement, decided from an N2 capture like MBS-BC-07 is: that the AMF
+activated the multicast session in the gNB and the gNB accepted it, that the
+two joining UEs' PDU sessions were associated with that MBS session and the
+gNB accepted that too, and that the third UE got none of it.
+
+The radio half -- a multicast MRB for each member, and payload arriving -- is
+reported as not implemented in a section of its own, with what it needs.
+
+A join names a TMGI, and the TMGI is whatever the core allocates, so the
+session is created first and ue1 and ue2 are then restarted with
+--mbs-join <tmgi>. MBS_UE1_EXTRA / MBS_UE2_EXTRA / MBS_UE3_EXTRA in the
+compose file append options to one UE's command line, which is what makes
+"ue1 and ue2 join, ue3 does not" expressible.
+
+decode_ngap.py gains what the check needs:
+
+- the TMGI is looked for inside the nested *Transfer octet strings, not only
+  at the top level -- the MBS session of a per-UE PDU Session Resource Modify
+  lives inside pDUSessionResourceModifyRequestTransfer;
+- the RAN UE NGAP ID is reported, which is the only thing in a capture that
+  tells one UE's procedures from another's, with --ran-ue to filter by it.
+  Finding it needed the search to understand pycrate's CHOICE pairs, since an
+  open-type IE value is a CHOICE and RAN-UE-NGAP-ID is its name, not a key.
+
+tests/tools/test_decode_ngap.py is a self-test of the decoder that needs no
+testbed: it builds the PDUs the MBS checks read with the same pycrate grammar,
+writes them into a capture and decodes them back, including the negative case
+of a UE that appears on N2 with no MBS procedure.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGwmGjgMjM39K5jaxnP
+---
+ testbed/mbs-mono/compose.yaml   |   8 ++
+ tests/README.md                 |   7 ++
+ tests/mbs-tn.md                 | 202 ++++++++++++++++++++++++++++++--
+ tests/tools/decode_ngap.py      | 115 ++++++++++++++++--
+ tests/tools/test_decode_ngap.py | 186 +++++++++++++++++++++++++++++
+ 5 files changed, 496 insertions(+), 22 deletions(-)
+ create mode 100644 tests/tools/test_decode_ngap.py
+
+diff --git a/testbed/mbs-mono/compose.yaml b/testbed/mbs-mono/compose.yaml
+index 057fc02..4bbceaa 100644
+--- a/testbed/mbs-mono/compose.yaml
++++ b/testbed/mbs-mono/compose.yaml
+@@ -12,6 +12,11 @@
+ #   MBS_GNB_IMAGE   default oai-gnb:mbs
+ #   MBS_UE_IMAGE    default oai-nr-ue:mbs
+ #
++# MBS_UE1_EXTRA / MBS_UE2_EXTRA / MBS_UE3_EXTRA append options to one UE's
++# command line, so a test can give one UE something the others do not have --
++# which is what makes "ue1 and ue2 join, ue3 does not" expressible. Recreate
++# only the UEs that change: `MBS_UE1_EXTRA=... docker compose up -d ue1`.
++#
+ # The gNB runs its T tracer on port 2021, so tests can record what it
+ # actually transmits (tests/tools/ttrace.py).
+ 
+@@ -102,6 +107,7 @@ services:
+                               --uicc0.imsi 999700123456701 --uicc0.key 00112233445566778899aabbccddee01
+                               --rfsimulator.[0].serveraddr 192.168.78.101
+                               --log_config.global_log_options level,nocolor,time
++                              ${MBS_UE1_EXTRA:-}
+     depends_on:
+       - gnb
+     volumes:
+@@ -119,6 +125,7 @@ services:
+                               --uicc0.imsi 999700123456702 --uicc0.key 00112233445566778899aabbccddee02
+                               --rfsimulator.[0].serveraddr 192.168.78.101
+                               --log_config.global_log_options level,nocolor,time
++                              ${MBS_UE2_EXTRA:-}
+     networks:
+       net_5g_rf:
+         ipv4_address: 192.168.78.202
+@@ -132,6 +139,7 @@ services:
+                               --uicc0.imsi 999700123456703 --uicc0.key 00112233445566778899aabbccddee03
+                               --rfsimulator.[0].serveraddr 192.168.78.101
+                               --log_config.global_log_options level,nocolor,time
++                              ${MBS_UE3_EXTRA:-}
+     networks:
+       net_5g_rf:
+         ipv4_address: 192.168.78.203
+diff --git a/tests/README.md b/tests/README.md
+index 16fefa2..259cd4e 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -77,6 +77,13 @@ tools/satsim_mock.py   the sender. Replays a trace over chan_steer, anchors to
+ tools/gen_traces.py    regenerates traces/ (checked in, so rarely needed).
+ tools/mcast_count.py   runs in a UE: counts the packets an application gets on
+                        a multicast group.
++tools/decode_ngap.py   decodes the NGAP PDUs of an N2 capture with pycrate --
++                       tshark 3.6 predates Rel-17 and shows every MBS procedure
++                       as an unknown code. Reports the RAN UE NGAP ID and the
++                       TMGI, looking inside the nested *Transfer octet strings.
++tools/test_decode_ngap.py  self-test of that decoder: builds the PDUs the MBS
++                       checks read, writes a capture, decodes it back. Needs no
++                       testbed -- run it after changing decode_ngap.py.
+ tools/ttrace.py        records what the gNB transmits from its T tracer, decodes
+                        SIB1/SIB20 and counts payloads per RNTI (needs pycrate).
+ tools/traces/*.csv     geo_static, leo_pass_600, leo_handover.
+diff --git a/tests/mbs-tn.md b/tests/mbs-tn.md
+index d923dd0..f815364 100644
+--- a/tests/mbs-tn.md
++++ b/tests/mbs-tn.md
+@@ -573,22 +573,200 @@ fi
+ 
+ *Multicast · R-SYS-5011, R-SYS-5031, R-SYS-5034, R-SYS-5036*
+ 
+-Where membership starts to mean something. A `MULTICAST` session is created
+-and activated, two of the three UEs join, and both receive — each having
+-been given a multicast MRB by RRC reconfiguration.
++Where membership starts to mean something. A `MULTICAST` session is created,
++two of the three UEs join it, and the core and the RAN agree about who is in
++it — decided from a capture of N2, for the same reason MBS-BC-07 is: a log
++line says what a process believes, a capture says what crossed the interface.
++
++What this asserts is the **signalling** half of the requirement: that the AMF
++activated the session in the gNB and the gNB accepted it, that each joining
++UE's PDU session was associated with that MBS session and the gNB accepted
++that too, and that the UE which did not ask got none of it. The radio half —
++a multicast MRB for each member, and payload arriving — is reported separately
++below, still unimplemented.
++
++A join needs a TMGI, and the TMGI is whatever the core allocates, so the
++session is created first and the two joining UEs are then restarted with
++`--mbs-join <tmgi>`. `MBS_UE1_EXTRA` and `MBS_UE2_EXTRA` in the compose file
++exist for exactly this: one UE gets an option the others do not.
+ 
+-<details><summary>the verdict</summary>
++<details><summary>start capturing N2 at the gNB, before the session exists</summary>
++
++Same arrangement as MBS-BC-07: a container sharing the gNB's network, writing
++into a fresh `mktemp -d` because tcpdump writes the file as root.
++
++```sh {"name":"mc02-capture-start"}
++set -eu
++export MBS_MC_N2DIR=$(mktemp -d)
++docker rm -f mbs-n2cap >/dev/null 2>&1 || true
++docker run -d --name mbs-n2cap --network container:gnb -v "$MBS_MC_N2DIR":/cap \
++  --entrypoint tcpdump "${PHINE_UE_IMAGE:-phine_oai_ue:ptm}" -i eth0 -nn -s0 -U -w /cap/n2.pcap sctp >/dev/null
++sleep 2
++echo "capturing N2 next to gnb"
++```
++
++</details>
++
++Create the session. Same request as the broadcast one, with
++`"serviceType":"MULTICAST"`.
++
++```sh {"name":"mc02-session"}
++docker exec core curl -s --http2-prior-knowledge -X POST \
++  -H 'Content-Type: application/json' \
++  -d '{"mbsSession":{"ssm":{"sourceIpAddr":{"ipv4Addr":"192.168.77.20"},
++       "destIpAddr":{"ipv4Addr":"239.0.0.26"}},"tmgiAllocReq":true,
++       "serviceType":"MULTICAST","snssai":{"sst":1},
++       "mbsServiceArea":{"tais":[{"plmnId":{"mcc":"999","mnc":"70"},"tac":"000001"}]}}}' \
++  127.0.0.4:7777/nmbsmf-mbssession/v1/mbs-sessions | tee /tmp/mbs-mc-session.json
++echo
++```
++
++<details><summary>work out the TMGI the core allocated, as the UEs have to name it</summary>
++
++The TMGI on the wire is six octets: three of MBS Service ID then the PLMN, in
++the TS 24.008 encoding (999/70 is `99 f9 07`). The API reports the service ID
++and the PLMN separately, so they are put together here — and the same string
++is what `--mbs-join` takes and what the capture is searched for, so a mistake
++shows up as a failed assertion rather than as a silent mismatch.
++
++```sh {"name":"mc02-tmgi"}
++set -eu
++export MBS_MC_SID=$(grep -o '"mbsServiceId":"[^"]*"' /tmp/mbs-mc-session.json | head -1 | cut -d'"' -f4 | tr 'A-F' 'a-f' || true)
++[ -n "${MBS_MC_SID:-}" ] || { echo "FAIL: the core did not report an mbsServiceId"; cat /tmp/mbs-mc-session.json; exit 1; }
++export MBS_MC_TMGI=$(python3 -c "
++import json, sys
++s = json.load(open('/tmp/mbs-mc-session.json'))
++tmgi = (s.get('mbsSession') or s).get('tmgi') or {}
++plmn = tmgi.get('plmnId') or {}
++mcc, mnc = plmn.get('mcc', '999'), plmn.get('mnc', '70')
++# TS 24.008 10.5.6.13: MCC digit 2|1, MNC digit 3|MCC digit 3, MNC digit 2|1,
++# with 'f' for the third MNC digit of a two-digit MNC.
++mnc3 = mnc[2] if len(mnc) == 3 else 'f'
++print('%s%s%s%s%s%s%s' % ('$MBS_MC_SID', mcc[1], mcc[0], mnc3, mcc[2], mnc[1], mnc[0]))
++")
++echo "the core allocated TMGI $MBS_MC_TMGI (service id $MBS_MC_SID)"
++```
++
++</details>
++
++ue1 and ue2 join it. ue3 is left alone.
++
++```sh {"name":"mc02-join"}
++cd "$MBS_A_DIR"
++MBS_UE1_EXTRA="--mbs-join $MBS_MC_TMGI" docker compose up -d --force-recreate ue1
++MBS_UE2_EXTRA="--mbs-join $MBS_MC_TMGI" docker compose up -d --force-recreate ue2
++```
++
++<details><summary>wait for the two of them to attach again, then let the join finish</summary>
++
++The join is sent once the UE's PDU session is up, so the attach has to be
++waited for; the extra seconds after it are for the NAS exchange and the two N2
++procedures it causes.
++
++```sh {"name":"mc02-wait"}
++set -eu
++for n in 1 2; do
++  echo -n "waiting for ue$n"
++  for i in $(seq 90); do
++    docker exec ue$n ip -4 addr show oaitun_ue1 2>/dev/null | grep 'inet ' >/dev/null && break
++    echo -n .; sleep 1
++  done
++  docker exec ue$n ip -4 addr show oaitun_ue1 2>/dev/null | grep 'inet ' >/dev/null \
++    || { echo " FAIL: ue$n did not attach"; docker logs ue$n 2>&1 | tail -10; exit 1; }
++  echo " attached"
++done
++sleep 8
++```
++
++</details>
++
++<details><summary>stop the capture, decode N2, and decide</summary>
++
++Four things are asserted, all from the capture:
++
++* the AMF sent a Multicast Session Activation (procedure code 71) naming the
++  TMGI the core allocated, and the gNB answered it with a `successfulOutcome`.
++  A `unsuccessfulOutcome` is a failure here, not an absence;
++* two distinct UEs got a PDU Session Resource Modify (procedure code 26)
++  carrying that same TMGI — that is the join reaching the RAN, one UE at a
++  time. The UEs are told apart by RAN UE NGAP ID, which is the only thing in a
++  capture that distinguishes them;
++* each of those two UEs answered with a `successfulOutcome` carrying the TMGI;
++* no third UE appears in either list. ue3 attached and has a PDU session like
++  the others, so an MBS procedure naming it would mean the core sent the join
++  to every UE rather than to the ones that asked — which is the failure this
++  check exists to catch.
++
++`decode_ngap.py` reports the TMGI of a per-UE modify by decoding the nested
++`pDUSessionResourceModifyRequestTransfer`, which is an opaque octet string at
++the top level of the PDU.
+ 
+ ```sh {"name":"mc02-verify"}
+ set -eu
+-echo "MBS-MC-02 NOT IMPLEMENTED: multicast sessions are not supported."
+-echo "  would check: NGAP multicast session setup and activation; ue1 and"
+-echo "               ue2 send MBSInterestIndication and are given a"
+-echo "               multicast MRB by RRC reconfiguration; both receive"
+-echo "               (R-SYS-5011, R-SYS-5031, R-SYS-5034, R-SYS-5036)"
+-echo "  needs:       Milestone 2 -- multicast session type, join signalling,"
+-echo "               per-session membership state"
+-export MBS_RESULTS="${MBS_RESULTS:-}NOTIMPL multicast MBS-MC-02;"
++cd "$(git rev-parse --show-toplevel)"
++sleep 3
++docker rm -f mbs-n2cap >/dev/null 2>&1 || true
++
++BAD=0
++python3 tests/tools/decode_ngap.py "$MBS_MC_N2DIR/n2.pcap" --procedure-code 71 | tee /tmp/n2-71.txt || true
++python3 tests/tools/decode_ngap.py "$MBS_MC_N2DIR/n2.pcap" --procedure-code 26 | tee /tmp/n2-26.txt || true
++
++ACT_REQ=$(grep initiatingMessage /tmp/n2-71.txt | grep -c "tmgi=$MBS_MC_TMGI" || true)
++ACT_OK=$(grep successfulOutcome /tmp/n2-71.txt | grep -c "tmgi=$MBS_MC_TMGI" || true)
++ACT_FAIL=$(grep -c unsuccessfulOutcome /tmp/n2-71.txt || true)
++[ "$ACT_REQ" -ge 1 ] && echo "ok: the AMF asked the gNB to activate TMGI $MBS_MC_TMGI" \
++                     || { echo "FAIL: no Multicast Session Activation for $MBS_MC_TMGI on N2"; BAD=1; }
++[ "$ACT_OK" -ge 1 ] && echo "ok: the gNB answered the activation successfully" \
++                    || { echo "FAIL: the gNB did not answer the activation"; BAD=1; }
++[ "$ACT_FAIL" -eq 0 ] || { echo "FAIL: the gNB answered the activation with a failure"; BAD=1; }
++
++# The joining UEs, by RAN UE NGAP ID, from the modify requests that name the TMGI.
++JOINED=$(grep initiatingMessage /tmp/n2-26.txt | grep "tmgi=$MBS_MC_TMGI" \
++         | grep -oE 'ran_ue=[0-9]+' | cut -d= -f2 | sort -u || true)
++ANSWERED=$(grep successfulOutcome /tmp/n2-26.txt | grep "tmgi=$MBS_MC_TMGI" \
++           | grep -oE 'ran_ue=[0-9]+' | cut -d= -f2 | sort -u || true)
++N_JOINED=$(echo "$JOINED" | grep -c . || true)
++N_ANSWERED=$(echo "$ANSWERED" | grep -c . || true)
++
++echo "UEs the core associated with the session: ${JOINED:-none}"
++echo "UEs the gNB confirmed:                    ${ANSWERED:-none}"
++
++[ "$N_JOINED" -eq 2 ] && echo "ok: exactly two UEs were associated with the MBS session" \
++                      || { echo "FAIL: $N_JOINED UE(s) were associated, expected 2 (ue1 and ue2)"; BAD=1; }
++[ "$N_ANSWERED" -eq 2 ] && echo "ok: the gNB accepted both of them" \
++                        || { echo "FAIL: the gNB confirmed $N_ANSWERED of them, expected 2"; BAD=1; }
++if [ "$N_JOINED" -eq 2 ] && [ "$N_ANSWERED" -eq 2 ]; then
++  [ "$JOINED" = "$ANSWERED" ] && echo "ok: the gNB confirmed the same two UEs the core named" \
++                              || { echo "FAIL: the core named [$JOINED], the gNB confirmed [$ANSWERED]"; BAD=1; }
++fi
++
++if [ "$BAD" -eq 0 ]; then
++  echo "MBS-MC-02 passed (signalling; the radio part is below)"
++  export MBS_RESULTS="${MBS_RESULTS:-}PASS multicast MBS-MC-02;"
++else
++  echo "MBS-MC-02 FAILED"
++  export MBS_RESULTS="${MBS_RESULTS:-}FAIL multicast MBS-MC-02;"
++fi
++```
++
++</details>
++
++<details><summary>the radio part, still unimplemented</summary>
++
++The signalling above says the gNB knows which UEs joined. Turning that into
++reception needs the parts tonight's work deliberately left out, so it is
++reported rather than asserted — a check that cannot pass yet should be visible,
++not absent.
++
++```sh {"name":"mc02-radio"}
++set -eu
++echo "MBS-MC-02 radio NOT IMPLEMENTED: the joined UEs get no multicast MRB."
++echo "  would check: ue1 and ue2 are given a multicast MRB by RRC"
++echo "               reconfiguration and both receive on 239.0.0.26, ue3"
++echo "               receives nothing (R-SYS-5031, R-SYS-5034, R-SYS-5036)"
++echo "  needs:       Distribution Setup so the shared NG-U tunnel exists;"
++echo "               then the multicast MRB and DCI 4_2 scheduling"
++export MBS_RESULTS="${MBS_RESULTS:-}NOTIMPL multicast MBS-MC-02-radio;"
+ ```
+ 
+ </details>
+diff --git a/tests/tools/decode_ngap.py b/tests/tools/decode_ngap.py
+index defa137..98ff5fb 100644
+--- a/tests/tools/decode_ngap.py
++++ b/tests/tools/decode_ngap.py
+@@ -12,7 +12,15 @@ Usage:
+     decode_ngap.py <pcap> [--procedure-code N] [--summary]
+ 
+ Prints one line per NGAP PDU:
+-    <src> -> <dst>  <kind>  procedureCode=<n>  [tmgi=<hex>]
++    <src> -> <dst>  <kind>  procedureCode=<n>  [ran_ue=<n>]  [tmgi=<hex>]
++
++A TMGI is looked for inside the nested transfer IEs too, not only at the top
++level of the PDU: the MBS session of a per-UE PDU Session Resource Modify
++lives inside pDUSessionResourceModifyRequestTransfer, which is an OCTET STRING
++CONTAINING on the wire and so comes out of pycrate as plain bytes.
++
++ran_ue is the RAN UE NGAP ID, which is what tells one UE's procedures from
++another's -- there is nothing else in a capture that does.
+ """
+ 
+ import argparse
+@@ -45,30 +53,109 @@ def ngap_payloads(path):
+             chunk = chunk.payload
+ 
+ 
++def find_key(val, key):
++    """Depth-first search for the first value of `key` anywhere in a decoded PDU.
++
++    pycrate gives a SEQUENCE as a dict and a CHOICE as a (name, value) pair, and
++    an open-type IE value is a CHOICE -- so `RAN-UE-NGAP-ID` is a choice *name*,
++    not a dict key, and a search that only walks dicts never finds it.
++    """
++    if isinstance(val, dict):
++        for k, v in val.items():
++            if k == key:
++                return v
++            found = find_key(v, key)
++            if found is not None:
++                return found
++    elif isinstance(val, tuple) and len(val) == 2 and isinstance(val[0], str):
++        if val[0] == key:
++            return val[1]
++        return find_key(val[1], key)
++    elif isinstance(val, (list, tuple)):
++        for v in val:
++            found = find_key(v, key)
++            if found is not None:
++                return found
++    return None
++
++
++def decode_transfer(name, buf):
++    """Decode a nested *Transfer octet string with the pycrate type of the same name.
++
++    pycrate names an ASN.1 type exactly as the grammar does, and the IE that
++    carries a transfer is named after it with a lowercase first letter, so the
++    type is recovered from the key. Returns None when there is no such type or
++    the octets are not that type -- a transfer this script does not know about
++    is not a reason to give up on the capture.
++    """
++    from pycrate_asn1dir import NGAP
++
++    type_name = name[0].upper() + name[1:]
++    spec = getattr(NGAP.NGAP_IEs, type_name, None)
++    if spec is None:
++        return None
++    try:
++        spec.from_aper(bytes(buf))
++        return spec.get_val()
++    except Exception:
++        return None
++
++
+ def find_tmgi(val):
+-    """Depth-first search for a TMGI octet string anywhere in a decoded PDU."""
++    """Depth-first search for a TMGI, descending into nested transfer IEs.
++
++    The top level is searched first so a PDU that carries the TMGI directly --
++    every non-UE-associated MBS procedure does -- costs no decoding.
++    """
++    direct = find_key(val, "tMGI")
++    if isinstance(direct, (bytes, bytearray)):
++        return bytes(direct)
++    return _find_tmgi_nested(val)
++
++
++def _find_tmgi_nested(val):
+     if isinstance(val, dict):
+         for k, v in val.items():
+-            if k == "tMGI" and isinstance(v, (bytes, bytearray)):
+-                return bytes(v)
+-            found = find_tmgi(v)
++            found = _try_transfer(k, v) or _find_tmgi_nested(v)
+             if found is not None:
+                 return found
++    elif isinstance(val, tuple) and len(val) == 2 and isinstance(val[0], str):
++        # a CHOICE: the transfer may be carried as the chosen alternative, named
++        # after the type it contains (OCTET STRING CONTAINING ...).
++        return _try_transfer(val[0], val[1]) or _find_tmgi_nested(val[1])
+     elif isinstance(val, (list, tuple)):
+         for v in val:
+-            found = find_tmgi(v)
++            found = _find_tmgi_nested(v)
+             if found is not None:
+                 return found
+     return None
+ 
+ 
++def _try_transfer(name, value):
++    """The TMGI inside `value`, when `name` says it is a nested transfer."""
++    if not name.endswith("Transfer") or not isinstance(value, (bytes, bytearray)):
++        return None
++    decoded = decode_transfer(name, value)
++    if decoded is None:
++        return None
++    return find_tmgi(decoded)
++
++
++def find_ran_ue_id(val):
++    """The RAN UE NGAP ID of a UE-associated PDU, or None for a non-UE-associated one."""
++    found = find_key(val, "RAN-UE-NGAP-ID")
++    return found if isinstance(found, int) else None
++
++
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("pcap")
+     ap.add_argument("--procedure-code", type=int, default=None,
+                     help="only report PDUs with this procedure code")
+     ap.add_argument("--summary", action="store_true",
+-                    help="print one line per (kind, procedureCode, tmgi) seen")
++                    help="print one line per (kind, procedureCode, ran_ue, tmgi) seen")
++    ap.add_argument("--ran-ue", type=int, default=None,
++                    help="only report PDUs of this RAN UE NGAP ID")
+     args = ap.parse_args()
+ 
+     from pycrate_asn1dir import NGAP
+@@ -87,17 +174,25 @@ def main():
+         if args.procedure_code is not None and code != args.procedure_code:
+             continue
+         tmgi = find_tmgi(body)
+-        row = (src, dst, kind, code, tmgi.hex() if tmgi else None)
++        ran_ue = find_ran_ue_id(body)
++        row = (src, dst, kind, code, tmgi.hex() if tmgi else None, ran_ue)
++        if args.ran_ue is not None and ran_ue != args.ran_ue:
++            continue
+         seen.append(row)
+         if not args.summary:
+             line = f"{src} -> {dst}  {kind}  procedureCode={code}"
++            if ran_ue is not None:
++                line += f"  ran_ue={ran_ue}"
+             if tmgi:
+                 line += f"  tmgi={tmgi.hex()}"
+             print(line)
+ 
+     if args.summary:
+-        for kind, code, tmgi in sorted({(r[2], r[3], r[4]) for r in seen}):
+-            print(f"{kind} procedureCode={code} tmgi={tmgi}")
++        for kind, code, ran_ue, tmgi in sorted(
++                {(r[2], r[3], r[5], r[4]) for r in seen},
++                key=lambda r: (r[0], r[1] if r[1] is not None else -1,
++                               r[2] if r[2] is not None else -1, r[3] or "")):
++            print(f"{kind} procedureCode={code} ran_ue={ran_ue} tmgi={tmgi}")
+ 
+     return 0 if seen else 1
+ 
+diff --git a/tests/tools/test_decode_ngap.py b/tests/tools/test_decode_ngap.py
+new file mode 100644
+index 0000000..c8d0b26
+--- /dev/null
++++ b/tests/tools/test_decode_ngap.py
+@@ -0,0 +1,186 @@
++#!/usr/bin/env python3
++"""Self-test of decode_ngap.py, run without a testbed.
++
++The runbook's MBS checks rest entirely on this decoder: if it misses a TMGI or
++attributes a procedure to the wrong UE, MBS-MC-02 is wrong in a way no amount
++of staring at the runbook would show. So the PDUs it has to read are built
++here with the same pycrate grammar, written into a capture, and decoded back.
++
++Synthetic, deliberately: a capture recorded from the testbed would pin the test
++to one run of one build, and could not express the negative case -- a UE that
++appears on N2 without any MBS procedure.
++
++    python3 tests/tools/test_decode_ngap.py
++"""
++
++import os
++import subprocess
++import sys
++import tempfile
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++DECODER = os.path.join(HERE, "decode_ngap.py")
++
++TMGI = bytes.fromhex("abcdef99f907")
++OTHER_TMGI = bytes.fromhex("00000299f907")
++
++# ProtocolIE-IDs of TS 38.413 V17.10.0, as the gNB's own grammar numbers them.
++ID_AMF_UE_NGAP_ID = 10
++ID_RAN_UE_NGAP_ID = 85
++ID_MODIFY_LIST_REQ = 64
++ID_MODIFY_LIST_RES = 65
++ID_MBS_SESSION_ID = 299
++ID_MBS_SETUPMOD_REQ_LIST = 319
++ID_MBS_SETUPMOD_RES_LIST = 313
++
++failures = []
++checks = 0
++
++
++def check(cond, what):
++    global checks
++    checks += 1
++    if cond:
++        print("ok:   %s" % what)
++    else:
++        print("FAIL: %s" % what)
++        failures.append(what)
++
++
++def _pdu():
++    from pycrate_asn1dir import NGAP
++    return NGAP.NGAP_PDU_Descriptions.NGAP_PDU
++
++
++def _enc(val):
++    spec = _pdu()
++    spec.set_val(val)
++    return spec.to_aper()
++
++
++def _transfer(type_name, val):
++    from pycrate_asn1dir import NGAP
++    spec = getattr(NGAP.NGAP_IEs, type_name)
++    spec.set_val(val)
++    return spec.to_aper()
++
++
++def modify_request(ran_ue, tmgi=None):
++    """A PDU Session Resource Modify Request, with the MBS list when a TMGI is given."""
++    ies = []
++    if tmgi is not None:
++        ies.append({"id": ID_MBS_SETUPMOD_REQ_LIST, "criticality": "ignore",
++                    "value": ("MBSSessionSetuporModifyRequestList",
++                              [{"mBS-SessionID": {"tMGI": tmgi}}])})
++    transfer = _transfer("PDUSessionResourceModifyRequestTransfer", {"protocolIEs": ies})
++    return _enc(("initiatingMessage", {
++        "procedureCode": 26, "criticality": "reject",
++        "value": ("PDUSessionResourceModifyRequest", {"protocolIEs": [
++            {"id": ID_AMF_UE_NGAP_ID, "criticality": "reject", "value": ("AMF-UE-NGAP-ID", ran_ue)},
++            {"id": ID_RAN_UE_NGAP_ID, "criticality": "reject", "value": ("RAN-UE-NGAP-ID", ran_ue)},
++            {"id": ID_MODIFY_LIST_REQ, "criticality": "reject",
++             "value": ("PDUSessionResourceModifyListModReq", [
++                 {"pDUSessionID": 1, "pDUSessionResourceModifyRequestTransfer": transfer}])},
++        ]})}))
++
++
++def modify_response(ran_ue, tmgi):
++    """The gNB's successful outcome, with the MBS session list as an IE extension."""
++    transfer = _transfer("PDUSessionResourceModifyResponseTransfer", {"iE-Extensions": [
++        {"id": ID_MBS_SETUPMOD_RES_LIST, "criticality": "ignore",
++         "extensionValue": ("MBSSessionSetupResponseList", [{"mBS-SessionID": {"tMGI": tmgi}}])},
++    ]})
++    return _enc(("successfulOutcome", {
++        "procedureCode": 26, "criticality": "reject",
++        "value": ("PDUSessionResourceModifyResponse", {"protocolIEs": [
++            {"id": ID_AMF_UE_NGAP_ID, "criticality": "ignore", "value": ("AMF-UE-NGAP-ID", ran_ue)},
++            {"id": ID_RAN_UE_NGAP_ID, "criticality": "ignore", "value": ("RAN-UE-NGAP-ID", ran_ue)},
++            {"id": ID_MODIFY_LIST_RES, "criticality": "ignore",
++             "value": ("PDUSessionResourceModifyListModRes", [
++                 {"pDUSessionID": 1, "pDUSessionResourceModifyResponseTransfer": transfer}])},
++        ]})}))
++
++
++def activation(kind, tmgi):
++    name = ("MulticastSessionActivationRequest" if kind == "initiatingMessage"
++            else "MulticastSessionActivationResponse")
++    return _enc((kind, {
++        "procedureCode": 71, "criticality": "reject",
++        "value": (name, {"protocolIEs": [
++            {"id": ID_MBS_SESSION_ID, "criticality": "reject",
++             "value": ("MBS-SessionID", {"tMGI": tmgi})},
++        ]})}))
++
++
++def write_capture(path):
++    from scapy.all import Ether, IP, wrpcap
++    from scapy.layers.sctp import SCTP, SCTPChunkData
++
++    core, gnb = "192.168.77.10", "192.168.77.101"
++    pkts = []
++
++    def add(src, dst, payload):
++        pkts.append(Ether() / IP(src=src, dst=dst) / SCTP(sport=38412, dport=60000)
++                    / SCTPChunkData(proto_id=60, data=payload))
++
++    add(core, gnb, activation("initiatingMessage", TMGI))
++    add(gnb, core, activation("successfulOutcome", TMGI))
++    for ran_ue in (1, 2):
++        add(core, gnb, modify_request(ran_ue, TMGI))
++        add(gnb, core, modify_response(ran_ue, TMGI))
++    # a UE with an ordinary modification and no MBS at all: it must not appear
++    # anywhere the TMGI does.
++    add(core, gnb, modify_request(3))
++    # and another session's TMGI, so "find any TMGI" cannot pass for "find this one"
++    add(core, gnb, activation("initiatingMessage", OTHER_TMGI))
++
++    wrpcap(path, pkts)
++
++
++def run(path, *args):
++    out = subprocess.run([sys.executable, DECODER, path] + list(args),
++                         capture_output=True, text=True)
++    return out.stdout.splitlines()
++
++
++def main():
++    tmgi = TMGI.hex()
++    with tempfile.TemporaryDirectory() as d:
++        path = os.path.join(d, "n2.pcap")
++        write_capture(path)
++
++        act = run(path, "--procedure-code", "71")
++        check(any("initiatingMessage" in l and "tmgi=" + tmgi in l for l in act),
++              "the activation request is found, with its TMGI")
++        check(any("successfulOutcome" in l and "tmgi=" + tmgi in l for l in act),
++              "the gNB's activation response is found")
++        check(any("tmgi=" + OTHER_TMGI.hex() in l for l in act),
++              "another session's activation is reported with its own TMGI")
++
++        mod = run(path, "--procedure-code", "26")
++        joined = sorted({l.split("ran_ue=")[1].split()[0]
++                         for l in mod if "initiatingMessage" in l and "tmgi=" + tmgi in l})
++        answered = sorted({l.split("ran_ue=")[1].split()[0]
++                           for l in mod if "successfulOutcome" in l and "tmgi=" + tmgi in l})
++        check(joined == ["1", "2"],
++              "the TMGI inside the nested request transfer is found, for UEs 1 and 2 (got %s)" % joined)
++        check(answered == ["1", "2"],
++              "the TMGI inside the nested response transfer is found too (got %s)" % answered)
++        check(not any("ran_ue=3" in l and "tmgi=" in l for l in mod),
++              "the UE that did not join carries no TMGI")
++        check(any("ran_ue=3" in l for l in mod),
++              "that UE is still reported, so its absence above is a real negative")
++
++        only_two = run(path, "--procedure-code", "26", "--ran-ue", "2")
++        check(only_two and all("ran_ue=2" in l for l in only_two),
++              "--ran-ue narrows the report to one UE")
++
++        summary = run(path, "--summary")
++        check(len(summary) == len(set(summary)), "--summary reports each row once")
++
++    print("\n%d check(s), %d failed" % (checks, len(failures)))
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+
+base-commit: b6403ecd657fae6eaba35bed64ae87d36a61405c

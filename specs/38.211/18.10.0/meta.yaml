@@ -1,0 +1,12 @@
+id: '38.211'
+title: NR physical channels and modulation
+official_title: NR; Physical channels and modulation
+version: 18.10.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.211/38211-ia0.zip
+archive: 38211-ia0.zip
+sha256: 08a349750d890f8cace62128ed1e2fc0fbdcd4d6c7786410b8d54fbe5a2b9dec
+converted: '2026-11-19'
+documents: 1
+clause_files: 23
+asn1_blocks: 0

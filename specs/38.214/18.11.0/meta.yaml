@@ -1,0 +1,12 @@
+id: '38.214'
+title: NR physical layer procedures for data
+official_title: NR; Physical layer procedures for data
+version: 18.11.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.214/38214-ib0.zip
+archive: 38214-ib0.zip
+sha256: 224cd0e11afa1f3daa2eb051bab3d702d80b0e7a8d25301ce1fdddb96f9dbee0
+converted: '2026-11-19'
+documents: 1
+clause_files: 54
+asn1_blocks: 0

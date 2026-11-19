@@ -1,0 +1,1 @@
+## 5.2 UE procedure for reporting channel state information (CSI)

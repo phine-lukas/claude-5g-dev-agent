@@ -5,9 +5,20 @@ Search with `scripts/spec_lookup.py`; cite as `TS <id> V<version> clause <n>`.
 
 | TS | Version | Title | ASN.1 | Converted | Contents |
 |---|---|---|---|---|---|
+| 23.247 | V18.8.0 | 5G MBS architecture | — | 2026-11-19 | [toc](23.247/18.8.0/toc.md) |
 | 23.502 | V18.14.0 | 5GS procedures | — | 2026-11-13 | [toc](23.502/18.14.0/toc.md) |
 | 24.501 | V18.14.0 | 5GS NAS | — | 2026-11-13 | [toc](24.501/18.14.0/toc.md) |
+| 29.244 | V18.10.0 | PFCP (N4) | — | 2026-11-19 | [toc](29.244/18.10.0/toc.md) |
 | 29.512 | V18.13.0 | Npcf SMPolicyControl | — | 2026-11-13 | [toc](29.512/18.13.0/toc.md) |
+| 29.532 | V18.6.0 | Nmbsmf MBS session management | — | 2026-11-19 | [toc](29.532/18.6.0/toc.md) |
+| 38.211 | V18.10.0 | NR; Physical channels and modulation | — | 2026-11-19 | [toc](38.211/18.10.0/toc.md) |
+| 38.212 | V18.8.0 | NR multiplexing and channel coding | — | 2026-11-19 | [toc](38.212/18.8.0/toc.md) |
+| 38.213 | V18.9.0 | NR; Physical layer procedures for control | — | 2026-11-19 | [toc](38.213/18.9.0/toc.md) |
+| 38.214 | V18.11.0 | NR; Physical layer procedures for data | — | 2026-11-19 | [toc](38.214/18.11.0/toc.md) |
+| 38.300 | V18.11.0 | NR; NR and NG-RAN Overall Description; Stage 2 | — | 2026-11-19 | [toc](38.300/18.11.0/toc.md) |
 | 38.321 | V18.10.0 | NR; Medium Access Control (MAC) protocol specification | — | 2026-11-05 | [toc](38.321/18.10.0/toc.md) |
+| 38.322 | V18.2.0 | NR; Radio Link Control (RLC) protocol specification | — | 2026-11-19 | [toc](38.322/18.2.0/toc.md) |
+| 38.323 | V18.5.0 | NR; Packet Data Convergence Protocol (PDCP) specification | — | 2026-11-19 | [toc](38.323/18.5.0/toc.md) |
 | 38.331 | V17.3.0 | NR; Radio Resource Control (RRC) protocol specification | yes | 2026-11-05 | [toc](38.331/17.3.0/toc.md) |
 | 38.413 | V17.10.0 | NG-RAN; NG Application Protocol (NGAP) | yes | 2026-11-13 | [toc](38.413/17.10.0/toc.md) |
+| 38.473 | V17.0.0 | F1AP | yes | 2026-11-19 | [toc](38.473/17.0.0/toc.md) |

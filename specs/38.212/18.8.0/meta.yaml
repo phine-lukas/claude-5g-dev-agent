@@ -1,0 +1,12 @@
+id: '38.212'
+title: NR multiplexing and channel coding
+official_title: ''
+version: 18.8.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.212/38212-i80.zip
+archive: 38212-i80.zip
+sha256: 1762858b2f09a5a48f5a4730ccbc72c43ff90bebb96c14833841e36a235c8e4c
+converted: '2026-11-19'
+documents: 1
+clause_files: 38
+asn1_blocks: 0

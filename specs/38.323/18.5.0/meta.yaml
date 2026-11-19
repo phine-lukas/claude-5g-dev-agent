@@ -1,0 +1,12 @@
+id: '38.323'
+title: NR PDCP
+official_title: NR; Packet Data Convergence Protocol (PDCP) specification
+version: 18.5.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.323/38323-i50.zip
+archive: 38323-i50.zip
+sha256: 63879d54281340a33a6f51182d41727651c5c4b55e13dca408053d72cad2b97a
+converted: '2026-11-19'
+documents: 1
+clause_files: 8
+asn1_blocks: 0

@@ -1,0 +1,76 @@
+# Apply — 2026-11-19-mbs-multicast-join
+
+Nothing here pushes. You apply the patches, build, test, and open the PR yourself.
+`/apply-delivery 2026-11-19-mbs-multicast-join` walks through all of this interactively.
+
+## Prerequisites
+
+- A local checkout of every repo listed below, with a clean working tree.
+- Each base commit must be reachable locally. If `git cat-file -e <BASE_SHA>`
+  fails, `git fetch origin` first — base commits often live on private feature
+  branches that your clone has not seen yet.
+- This delivery lives in `deliveries/2026-11-19-mbs-multicast-join` on `main` of the toolkit repo:
+
+```bash
+cd "$DEV_AGENT_HOME"
+git switch main && git pull --ff-only origin main
+DELIVERY="$DEV_AGENT_HOME/deliveries/2026-11-19-mbs-multicast-join"
+```
+
+## Per repo
+
+| Repo | Role | Base branch | Base SHA | Patches |
+|---|---|---|---|---|
+| `open5gs` (5G-MAG) | target | `5mbs-development` | `19149433` | 1 |
+| `openairinterface5g` (phinetech) | target | `mbs-ptm` | `a29db1e91` | 3 |
+| `frq-adsat-phine` | test | `tests/acceptance-runbooks` | `b6403ec` | 1 |
+
+For each repo:
+
+```bash
+cd <repo-checkout>
+git fetch origin
+git cat-file -e <BASE_SHA>                       # must succeed before continuing
+git switch -c feature/2026-11-19-mbs-multicast-join <BASE_SHA>
+git am -3 "$DELIVERY"/patches/<repo-name>/*.patch
+```
+
+Apply the repos in the order listed above when one depends on another.
+
+## If `git am` conflicts
+
+```bash
+git status                       # what collided
+# resolve the files, then:
+git add <resolved files>
+git am --continue
+```
+
+Stop and look at the conflict rather than forcing it through — a conflict usually
+means the base branch moved under the patch. To start over:
+
+```bash
+git am --abort
+git switch -                     # back where you were
+git branch -D feature/2026-11-19-mbs-multicast-join
+```
+
+## Rebasing onto the current base branch
+
+The series is cut against `<BASE_SHA>`. To move it onto the branch's current tip,
+apply on the base first (above), then:
+
+```bash
+git fetch origin
+git rebase origin/<base-branch>
+```
+
+Rebasing first and applying second tends to produce worse conflicts — apply on the
+recorded base, then rebase.
+
+## Then
+
+1. Build — see [TESTING.md](TESTING.md).
+2. Run the tiers marked SKIPPED, NOT RUN or LOCAL ONLY there.
+3. Squash any `fixup!` commits: `git rebase -i --autosquash <BASE_SHA>`.
+4. Push and open the PR yourself, using [PR_DESCRIPTION.md](PR_DESCRIPTION.md).

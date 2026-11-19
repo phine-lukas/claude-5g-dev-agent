@@ -1,0 +1,12 @@
+id: '38.213'
+title: NR physical layer procedures for control
+official_title: NR; Physical layer procedures for control
+version: 18.9.0
+release: 18
+source: https://www.3gpp.org/ftp/Specs/archive/38_series/38.213/38213-i90.zip
+archive: 38213-i90.zip
+sha256: 719aba617d25367619e8c73e5f58f950951b11a569511117efd43a16cd914196
+converted: '2026-11-19'
+documents: 1
+clause_files: 48
+asn1_blocks: 0

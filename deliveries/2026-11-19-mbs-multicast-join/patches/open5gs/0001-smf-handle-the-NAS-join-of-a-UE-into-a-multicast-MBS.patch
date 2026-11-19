@@ -1,0 +1,1373 @@
+From 3d4a155f32638364987f90b73c061cd65059f037 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 16:43:08 +0000
+Subject: [PATCH] smf: handle the NAS join of a UE into a multicast MBS session
+
+A PDU Session Modification Request carrying a Requested MBS container is an
+MBS join (TS 23.247 V18.8.0 clause 7.2.1.3 step 1). The SMF never looked at
+the IE, and the request then fell into the QoS-flow handling, which needs
+exactly one flow to modify and answered a Modification Reject.
+
+Handle it instead, in src/smf/mbs-join.c:
+
+- parse the Requested MBS container (TS 24.501 V18.14.0 clause 9.11.4.30)
+  and build the Received MBS container of the answer (clause 9.11.4.31);
+- find the multicast MBS session by TMGI and add the UE's PDU session to its
+  membership (clause 7.2.1.3 steps 2 and 4). The SMF and the MB-SMF are one
+  process in this deployment, so the NRF discovery and the
+  Nmbsmf_MBSSession_ContextStatusSubscribe of those steps are a lookup in
+  this process's own context;
+- answer the UpdateSMContext with the N1 container (PDU Session Modification
+  Command, Received MBS container) and the N2 SM information (step 5): a PDU
+  Session Resource Modify Request Transfer whose
+  MBSSessionSetuporModifyRequestList (TS 38.413 V17.10.0, ProtocolIE-ID 319)
+  names the MBS session the UE joined;
+- ask the AMF to activate the session in the RAN when the first member joins
+  (Namf_MBSCommunication N2MessageTransfer, TS 29.518 V17.8.0 clause 5.7.2.2,
+  ngapIeType MBS_SES_ACT_REQ). The AMF already knew how to build the
+  MULTICAST SESSION ACTIVATION REQUEST from it; nothing called it.
+
+A join needs no PFCP exchange: 5GC shared delivery is used, and clause
+7.2.1.3 NOTE 8 says no interaction with the UPF is needed for the session.
+
+Membership lives on smf_mbs_sess_t as a list of associated PDU sessions, held
+by pool id, and a released PDU session leaves every session it joined.
+
+Unit tests in tests/unit/smf-mbs-test.c cover both container codecs in both
+directions, the agreement of the NAS and NGAP TMGI encodings, and the two new
+NGAP transfers, decoded back to check their IE ids and shapes.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PR4cGwmGjgMjM39K5jaxnP
+---
+ src/smf/context.c         | 103 ++++++++++
+ src/smf/context.h         |  27 +++
+ src/smf/gsm-handler.c     |  15 ++
+ src/smf/mbs-join.c        | 417 ++++++++++++++++++++++++++++++++++++++
+ src/smf/mbs-join.h        | 114 +++++++++++
+ src/smf/meson.build       |   2 +
+ src/smf/namf-build.c      |  85 ++++++++
+ src/smf/namf-build.h      |   2 +
+ src/smf/ngap-build.c      |  84 ++++++++
+ src/smf/ngap-build.h      |   5 +
+ src/smf/sbi-path.c        |  23 +++
+ src/smf/sbi-path.h        |   2 +
+ tests/unit/smf-mbs-test.c | 244 ++++++++++++++++++++++
+ 13 files changed, 1123 insertions(+)
+ create mode 100644 src/smf/mbs-join.c
+ create mode 100644 src/smf/mbs-join.h
+
+diff --git a/src/smf/context.c b/src/smf/context.c
+index 439aad66..0dd0850a 100644
+--- a/src/smf/context.c
++++ b/src/smf/context.c
+@@ -2056,6 +2056,11 @@ void smf_sess_remove(smf_sess_t *sess)
+ 
+     ogs_list_remove(&smf_ue->sess_list, sess);
+ 
++    /* A released PDU session leaves every multicast MBS session it had joined (TS 23.247 V18.8.0
++     * cl. 7.2.2.3: the UE is removed from the multicast MBS session when its associated PDU session
++     * is released). Nothing else in the release path knows about MBS, so it is done here. */
++    smf_mbs_member_remove_by_sess(sess);
++
+     memset(&e, 0, sizeof(e));
+     e.sess_id = sess->id;
+     ogs_fsm_fini(&sess->sm, &e);
+@@ -4094,6 +4099,101 @@ void smf_mbs_sess_context_released(smf_mbs_sess_t *mbs_sess, smf_mbs_amf_t *amf)
+ 
+ /* The MBS session of a TMGI that a notification names: for a location dependent MBS session the part with
+  * the Area Session ID of the notification, otherwise the session of the TMGI. */
++/*
++ * Membership of a multicast MBS session (TS 23.247 V18.8.0 cl. 7.2.1.3).
++ *
++ * A member is one associated PDU session, held by pool id. Holding the id rather than the pointer is
++ * what makes smf_mbs_member_find() able to notice that the PDU session has been released in the
++ * meantime -- the MBS session outlives its members, and nothing in the release path of a PDU session
++ * knows about MBS.
++ */
++smf_mbs_member_t *smf_mbs_member_find(smf_mbs_sess_t *mbs_sess, const smf_sess_t *sess)
++{
++    smf_mbs_member_t *member = NULL, *next = NULL;
++
++    ogs_assert(mbs_sess);
++    ogs_assert(sess);
++
++    ogs_list_for_each_safe(&mbs_sess->member_list, next, member) {
++        smf_sess_t *member_sess = smf_sess_find_by_id(member->sess_id);
++
++        if (!member_sess) {
++            /* the PDU session went away without telling us: take the stale entry out */
++            ogs_list_remove(&mbs_sess->member_list, member);
++            ogs_free(member);
++            continue;
++        }
++        if (member_sess == sess)
++            return member;
++    }
++
++    return NULL;
++}
++
++smf_mbs_member_t *smf_mbs_member_add(smf_mbs_sess_t *mbs_sess, const smf_sess_t *sess)
++{
++    smf_mbs_member_t *member = NULL;
++
++    ogs_assert(mbs_sess);
++    ogs_assert(sess);
++
++    /* A repeated join for the same session is not an error: TS 24.501 V18.14.0 cl. 6.3.2.2 has the SMF
++     * answer with "MBS join is accepted" either way, so the caller wants the existing entry back. */
++    member = smf_mbs_member_find(mbs_sess, sess);
++    if (member)
++        return member;
++
++    member = ogs_calloc(1, sizeof(*member));
++    ogs_assert(member);
++
++    member->sess_id = sess->id;
++    member->psi = sess->psi;
++
++    ogs_list_add(&mbs_sess->member_list, member);
++
++    return member;
++}
++
++void smf_mbs_member_remove(smf_mbs_sess_t *mbs_sess, smf_mbs_member_t *member)
++{
++    ogs_assert(mbs_sess);
++    ogs_assert(member);
++
++    ogs_list_remove(&mbs_sess->member_list, member);
++    ogs_free(member);
++}
++
++void smf_mbs_member_remove_all(smf_mbs_sess_t *mbs_sess)
++{
++    smf_mbs_member_t *member = NULL, *next = NULL;
++
++    ogs_assert(mbs_sess);
++
++    ogs_list_for_each_safe(&mbs_sess->member_list, next, member)
++        smf_mbs_member_remove(mbs_sess, member);
++}
++
++void smf_mbs_member_remove_by_sess(const smf_sess_t *sess)
++{
++    smf_mbs_sess_t *mbs_sess = NULL;
++
++    ogs_assert(sess);
++
++    /* Walked rather than indexed: a deployment has far fewer MBS sessions than PDU sessions, and an
++     * index the other way would have to be kept correct through every PDU session teardown path. */
++    ogs_list_for_each(&self.smf_mbs_sess_list, mbs_sess) {
++        smf_mbs_member_t *member = NULL, *next = NULL;
++
++        ogs_list_for_each_safe(&mbs_sess->member_list, next, member) {
++            if (member->sess_id != sess->id)
++                continue;
++            ogs_info("MBS session [%s]: PDU session %d left (released)",
++                    mbs_sess->mbs_session_ref ? mbs_sess->mbs_session_ref : "?", member->psi);
++            smf_mbs_member_remove(mbs_sess, member);
++        }
++    }
++}
++
+ smf_mbs_sess_t *smf_mbs_sess_find_by_tmgi_and_area(
+         ogs_tmgi_t *tmgi_to_find, bool has_area_session_id, uint16_t area_session_id)
+ {
+@@ -4180,6 +4280,9 @@ static void smf_mbs_sess_free(smf_mbs_sess_t *smf_mbs_sess)
+             smf_mbs_sess_dl_tunnel_remove(smf_mbs_sess, tunnel);
+     }
+ 
++    /* the membership ends with the session */
++    smf_mbs_member_remove_all(smf_mbs_sess);
++
+     if (smf_mbs_sess->service_type)
+         ogs_free(smf_mbs_sess->service_type);
+ 
+diff --git a/src/smf/context.h b/src/smf/context.h
+index 3ec6d17c..a2b59e5d 100644
+--- a/src/smf/context.h
++++ b/src/smf/context.h
+@@ -657,6 +657,18 @@ typedef struct smf_mbs_dl_tunnel_s {
+     uint16_t unicast_params_id; /* MBS Unicast Parameters ID, from 1 */
+ } smf_mbs_dl_tunnel_t;
+ 
++/* A UE that has joined a multicast MBS session (TS 23.247 V18.8.0 cl. 7.2.1.3 step 5: the SMF informs
++ * "the NG-RAN about the relation between the Multicast MBS Session Context and the UE's PDU Session
++ * context"). One entry per associated PDU session, so a UE with two PDU sessions joined to the same
++ * session has two. The PDU session is held by id, not by pointer: it can be released while the MBS
++ * session lives on, and smf_mbs_member_find() drops an entry whose session is gone. */
++typedef struct smf_mbs_member_s {
++    ogs_lnode_t lnode;
++
++    ogs_pool_id_t sess_id;      /* the associated PDU session (smf_sess_t) */
++    uint8_t psi;                /* its PDU session identity, kept for logs after the session is gone */
++} smf_mbs_member_t;
++
+ /* A status subscription of an MBS session (TS 29.532 V18.6.0 cl. 5.3.2.6, StatusSubscribe), the resource
+  * /mbs-sessions/subscriptions/{subscriptionId} */
+ #define SMF_MBS_EVENT(type) ((uint32_t)1 << (type))
+@@ -727,6 +739,14 @@ typedef struct smf_mbs_sess_s {
+     OpenAPI_mbs_session_activity_status_e activity_status;
+     const char *state;
+ 
++    /* The UEs that joined this multicast MBS session: smf_mbs_member_t entries. Empty for a broadcast
++     * session, which has no membership at all (TS 23.247 V18.8.0 cl. 4.1). */
++    ogs_list_t member_list;
++
++    /* The RAN has been told to activate this session (a MulticastSessionActivationRequest was relayed
++     * through the AMF). Set when the first member joins, so later joiners do not re-activate it. */
++    bool ran_activated;
++
+     ogs_pfcp_sess_t pfcp;   /* PFCP session context */
+ 
+     ogs_pool_id_t *smf_n4mb_seid_node; /* A node of SMF-N4mb-SEID */
+@@ -1006,6 +1026,13 @@ smf_mbs_sess_t *smf_mbs_sess_find_by_id(ogs_pool_id_t id);
+ smf_mbs_sess_t *smf_mbs_sess_find_by_mbs_session_ref(char *mbs_session_ref);
+ smf_mbs_sess_t *smf_mbs_sess_find_by_seid(uint64_t seid);
+ smf_mbs_sess_t *smf_mbs_sess_find_by_tmgi(ogs_tmgi_t *tmgi_to_find);
++
++smf_mbs_member_t *smf_mbs_member_find(smf_mbs_sess_t *mbs_sess, const smf_sess_t *sess);
++smf_mbs_member_t *smf_mbs_member_add(smf_mbs_sess_t *mbs_sess, const smf_sess_t *sess);
++void smf_mbs_member_remove(smf_mbs_sess_t *mbs_sess, smf_mbs_member_t *member);
++void smf_mbs_member_remove_all(smf_mbs_sess_t *mbs_sess);
++/* Drop \p sess from every multicast MBS session it joined; called when the PDU session goes away. */
++void smf_mbs_member_remove_by_sess(const smf_sess_t *sess);
+ smf_mbs_amf_t *smf_mbs_sess_amf_add(smf_mbs_sess_t *mbs_sess);
+ smf_mbs_amf_t *smf_mbs_sess_amf_find(smf_mbs_sess_t *mbs_sess, uint32_t id);
+ void smf_mbs_sess_amf_remove(smf_mbs_sess_t *mbs_sess, smf_mbs_amf_t *amf);
+diff --git a/src/smf/gsm-handler.c b/src/smf/gsm-handler.c
+index 621f3e29..2e576395 100644
+--- a/src/smf/gsm-handler.c
++++ b/src/smf/gsm-handler.c
+@@ -21,6 +21,8 @@
+ #include "sbi-path.h"
+ #include "pfcp-path.h"
+ 
++#include "mbs-join.h"
++
+ #include "ipfw/ipfw2.h"
+ 
+ #undef OGS_LOG_DOMAIN
+@@ -224,6 +226,19 @@ int gsm_handle_pdu_session_modification_request(
+         /* Nothing to do */
+     }
+ 
++    /* An MBS join or leave rides on the same message (TS 23.247 V18.8.0 cl. 7.2.1.3 step 1: "the UE
++     * sends a PDU Session Modification Request over that PDU session [...] which additionally
++     * contains one or several MBS Session ID(s) and join request"). It changes no QoS rule and no QoS
++     * flow description, so it cannot go through the handling below -- which requires exactly one QoS
++     * flow to modify and rejects the message otherwise. It is handled, and the stream answered, here.
++     */
++    if (pdu_session_modification_request->presencemask &
++        OGS_NAS_5GS_PDU_SESSION_MODIFICATION_REQUEST_REQUESTED_MBS_CONTAINER_PRESENT) {
++        if (smf_mbs_handle_join(sess, stream,
++                    &pdu_session_modification_request->requested_mbs_container))
++            return OGS_OK;
++    }
++
+     if (pdu_session_modification_request->presencemask &
+         OGS_NAS_5GS_PDU_SESSION_MODIFICATION_REQUEST_REQUESTED_QOS_RULES_PRESENT) {
+         int num_of_rule = 0;
+diff --git a/src/smf/mbs-join.c b/src/smf/mbs-join.c
+new file mode 100644
+index 00000000..80754fd1
+--- /dev/null
++++ b/src/smf/mbs-join.c
+@@ -0,0 +1,417 @@
++/*
++ * MBS multicast join over NAS (TS 23.247 V18.8.0 clause 7.2.1.3).
++ *
++ * This file is part of Open5GS.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#include "mbs-join.h"
++#include "gsm-build.h"
++#include "ngap-build.h"
++#include "sbi-path.h"
++
++#undef OGS_LOG_DOMAIN
++#define OGS_LOG_DOMAIN __smf_log_domain
++
++/*
++ * The contents of a Requested MBS container, TS 24.501 V18.14.0 clause 9.11.4.30 figure 9.11.4.30.2:
++ *
++ *   octet 4   bits 1-2  Type of multicast MBS session ID
++ *             bits 3-4  MBS operation
++ *             bits 5-8  spare
++ *   octet 5.. the multicast MBS session ID itself: 6 octets for a TMGI (figure 9.11.4.30.3), or a
++ *             source/destination address pair for the SSM forms (figure 9.11.4.30.4), 8 octets for
++ *             IPv4 and 32 for IPv6.
++ *
++ * The entries are not length-prefixed, so the length of each one follows from its ID type -- which
++ * is also why an unknown ID type has to end the parse rather than be skipped.
++ */
++#define SMF_MBS_ID_TYPE(octet)  ((octet) & 0x03)
++#define SMF_MBS_OPERATION(octet) (((octet) >> 2) & 0x03)
++
++bool smf_mbs_tmgi_to_octets(const ogs_tmgi_t *tmgi, uint8_t *out)
++{
++    ogs_assert(tmgi);
++    ogs_assert(out);
++
++    if (!tmgi->mbs_service_id) {
++        ogs_error("TMGI without an MBS Service ID");
++        return false;
++    }
++    if (strlen(tmgi->mbs_service_id) != 6) {
++        ogs_error("MBS Service ID [%s] is not 6 hex characters", tmgi->mbs_service_id);
++        return false;
++    }
++
++    /* The same layout ogs_ngap_5gs_tmgi_to_ASN() produces: 3 octets of service id then the PLMN
++     * identity copied whole, which is already in its TS 24.008 wire encoding. */
++    ogs_ascii_to_hex(tmgi->mbs_service_id, 6, out, 3);
++    memcpy(out + 3, &tmgi->plmn_id, OGS_PLMN_ID_LEN);
++
++    return true;
++}
++
++int smf_mbs_parse_requested_container(
++        const uint8_t *buf, uint16_t len, smf_mbs_request_t *out, int max)
++{
++    uint16_t pos = 0;
++    int num = 0;
++
++    ogs_assert(out);
++
++    if (!buf) {
++        ogs_error("Requested MBS container without contents");
++        return -1;
++    }
++
++    while (pos < len) {
++        uint8_t octet4 = buf[pos];
++        uint8_t id_type = SMF_MBS_ID_TYPE(octet4);
++        uint8_t operation = SMF_MBS_OPERATION(octet4);
++        uint16_t id_len;
++
++        switch (id_type) {
++        case SMF_MBS_SESSION_ID_TMGI:
++            id_len = SMF_MBS_TMGI_LEN;
++            break;
++        case SMF_MBS_SESSION_ID_SSM_IPV4:
++            id_len = 8;     /* two IPv4 addresses */
++            break;
++        case SMF_MBS_SESSION_ID_SSM_IPV6:
++            id_len = 32;    /* two IPv6 addresses */
++            break;
++        default:
++            /* "All other values are reserved": with no length to skip, the rest of the container
++             * cannot be located, so the whole IE is rejected. */
++            ogs_error("Requested MBS container: reserved session ID type [%d] at octet %d",
++                    id_type, pos);
++            return -1;
++        }
++
++        if ((uint32_t)pos + 1 + id_len > len) {
++            ogs_error("Requested MBS container: entry at octet %d runs past the IE (%d octets)",
++                    pos, len);
++            return -1;
++        }
++
++        if (operation != SMF_MBS_OP_JOIN && operation != SMF_MBS_OP_LEAVE) {
++            ogs_error("Requested MBS container: reserved MBS operation [%d]", operation);
++            return -1;
++        }
++
++        if (num < max) {
++            memset(&out[num], 0, sizeof(out[num]));
++            out[num].operation = (smf_mbs_operation_e)operation;
++            out[num].session_id_type = (smf_mbs_session_id_type_e)id_type;
++            if (id_type == SMF_MBS_SESSION_ID_TMGI)
++                memcpy(out[num].tmgi, buf + pos + 1, SMF_MBS_TMGI_LEN);
++            num++;
++        } else {
++            ogs_warn("Requested MBS container: more than %d entries, the rest is ignored", max);
++        }
++
++        pos += 1 + id_len;
++    }
++
++    return num;
++}
++
++/*
++ * The contents of a Received MBS container, TS 24.501 V18.14.0 clause 9.11.4.31 figure 9.11.4.31.2:
++ *
++ *   octet 4   bits 1-3  MBS decision (MD)
++ *             bits 4-5  MBS service area indication (MSAI)
++ *             bits 6-8  Rejection cause
++ *   octet 5   bit  1    IP address existence (IPAE)
++ *             bits 2-3  MBS timer indication (MTI)
++ *             bit  4    MBS security container indication (MSCI)
++ *             bit  5    IP address type (IPAT)
++ *             bits 6-8  spare
++ *   octet 6.. TMGI (6 octets)
++ *
++ * Everything the flags can switch on is left out, so one entry is always 8 octets. The TMGI is always
++ * present: cl. 6.3.2.2 has the SMF "include the TMGI for the multicast MBS session IDs that the UE is
++ * allowed to join" and the mirror of that for the rejected ones, whatever the UE used to ask.
++ */
++#define SMF_MBS_RECEIVED_ENTRY_LEN 8
++
++int smf_mbs_build_received_container(
++        uint8_t *buf, uint16_t size, const smf_mbs_result_t *results, int num)
++{
++    int i;
++    uint16_t pos = 0;
++
++    ogs_assert(buf);
++    ogs_assert(results);
++
++    if ((uint32_t)num * SMF_MBS_RECEIVED_ENTRY_LEN > size) {
++        ogs_error("Received MBS container: %d entries do not fit in %d octets", num, size);
++        return -1;
++    }
++
++    for (i = 0; i < num; i++) {
++        uint8_t cause = 0;
++
++        /* "If MD is set to 'MBS join is rejected' or 'Remove UE from multicast MBS session', bits 6
++         * to 8 of octet 4 shall contain the Rejection cause [...] otherwise bits 6 to 8 of octet 4
++         * are spare and shall be coded as zero." */
++        if (results[i].decision == SMF_MBS_DECISION_JOIN_REJECTED ||
++                results[i].decision == SMF_MBS_DECISION_REMOVE_UE)
++            cause = (uint8_t)results[i].reject_cause & 0x07;
++
++        buf[pos++] = (uint8_t)((cause << 5) | ((uint8_t)results[i].decision & 0x07));
++        buf[pos++] = 0; /* IPAE=0, MTI=00, MSCI=0, IPAT=0, spare */
++        memcpy(buf + pos, results[i].tmgi, SMF_MBS_TMGI_LEN);
++        pos += SMF_MBS_TMGI_LEN;
++    }
++
++    return pos;
++}
++
++/* PDU SESSION MODIFICATION COMMAND carrying nothing but a Received MBS container.
++ *
++ * A join changes no QoS rule and no QoS flow description -- the multicast QoS flows live in the MBS
++ * session, not in the PDU session -- so gsm_build_pdu_session_modification_command() cannot be
++ * reused: it builds its lists out of sess->qos_flow_to_modify_list, which is empty here. */
++static ogs_pkbuf_t *build_modification_command(
++        smf_sess_t *sess, const smf_mbs_result_t *results, int num)
++{
++    ogs_nas_5gs_message_t message;
++    ogs_nas_5gs_pdu_session_modification_command_t *command =
++            &message.gsm.pdu_session_modification_command;
++    uint8_t contents[SMF_MBS_MAX_REQUESTS * SMF_MBS_RECEIVED_ENTRY_LEN];
++    int len;
++
++    ogs_assert(sess);
++
++    len = smf_mbs_build_received_container(contents, sizeof(contents), results, num);
++    if (len < 0)
++        return NULL;
++
++    memset(&message, 0, sizeof(message));
++    message.gsm.h.extended_protocol_discriminator =
++            OGS_NAS_EXTENDED_PROTOCOL_DISCRIMINATOR_5GSM;
++    message.gsm.h.pdu_session_identity = sess->psi;
++    message.gsm.h.procedure_transaction_identity = sess->pti;
++    message.gsm.h.message_type = OGS_NAS_5GS_PDU_SESSION_MODIFICATION_COMMAND;
++
++    command->presencemask |=
++        OGS_NAS_5GS_PDU_SESSION_MODIFICATION_COMMAND_RECEIVED_MBS_CONTAINER_PRESENT;
++    command->received_mbs_container.length = len;
++    command->received_mbs_container.buffer = contents;
++
++    return ogs_nas_5gs_plain_encode(&message);
++}
++
++/* Ask the RAN to activate the session, through the AMF (TS 29.518 V17.8.0 cl. 5.7.2.2,
++ * Namf_MBSCommunication N2MessageTransfer with ngapIeType MBS_SES_ACT_REQ). The AMF already knows
++ * how to wrap it into a MULTICAST SESSION ACTIVATION REQUEST; only the transfer is built here. */
++static void activate_in_ran(smf_mbs_sess_t *mbs_sess)
++{
++    ogs_assert(mbs_sess);
++
++    if (mbs_sess->ran_activated)
++        return;
++    if (!mbs_sess->tmgi) {
++        ogs_error("MBS session without a TMGI cannot be activated in the RAN");
++        return;
++    }
++
++    if (smf_sbi_send_mbs_comm_n2_message_transfer(
++                mbs_sess, OpenAPI_mbs_ngap_ie_type_MBS_SES_ACT_REQ) != OGS_OK) {
++        ogs_error("Failed to send the Multicast Session Activation to the AMF");
++        return;
++    }
++
++    mbs_sess->ran_activated = true;
++    mbs_sess->state = smf_mbs_sess_multicast_state_active;
++    mbs_sess->activity_status = OpenAPI_mbs_session_activity_status_ACTIVE;
++}
++
++/*
++ * The join itself. TS 23.247 V18.8.0 cl. 7.2.1.3:
++ *
++ *   step 2  find the MBS session context for the TMGI. In this deployment the SMF and the MB-SMF are
++ *           one process (one open5gs-smfd serves both roles), so the NRF discovery and the
++ *           Nmbsmf_MBSSession_ContextStatusSubscribe of steps 2 and 3 are a lookup in this process's
++ *           own context. A split deployment replaces find_multicast_session() with those two calls.
++ *   step 4  authorise. There is no MBS subscription data in this deployment, so a session the MB-SMF
++ *           knows is accepted and one it does not know is rejected with "Session context not found".
++ *   step 5  answer the UpdateSMContext with the N1 container (Modification Command, Received MBS
++ *           container) and the N2 SM information (PDU Session Resource Modify Request Transfer with
++ *           the MBS session to set up).
++ */
++static smf_mbs_sess_t *find_multicast_session(const uint8_t *tmgi_octets)
++{
++    smf_mbs_sess_t *mbs_sess = NULL;
++
++    ogs_list_for_each(&smf_self()->smf_mbs_sess_list, mbs_sess) {
++        uint8_t octets[SMF_MBS_TMGI_LEN];
++
++        if (!mbs_sess->service_type ||
++                ogs_strcasecmp(mbs_sess->service_type, "MULTICAST") != 0)
++            continue;
++        if (!mbs_sess->tmgi)
++            continue;
++        if (!smf_mbs_tmgi_to_octets(mbs_sess->tmgi, octets))
++            continue;
++        if (memcmp(octets, tmgi_octets, SMF_MBS_TMGI_LEN) == 0)
++            return mbs_sess;
++    }
++
++    return NULL;
++}
++
++static void tmgi_hex(const uint8_t *tmgi, char *out, size_t size)
++{
++    int i;
++
++    for (i = 0; i < SMF_MBS_TMGI_LEN && (size_t)(2 * i + 3) <= size; i++)
++        ogs_snprintf(out + 2 * i, 3, "%02x", tmgi[i]);
++}
++
++bool smf_mbs_handle_join(smf_sess_t *sess, ogs_sbi_stream_t *stream,
++        const ogs_nas_requested_mbs_container_t *container)
++{
++    smf_mbs_request_t requests[SMF_MBS_MAX_REQUESTS];
++    smf_mbs_result_t results[SMF_MBS_MAX_REQUESTS];
++    smf_mbs_sess_t *accepted[SMF_MBS_MAX_REQUESTS];
++    uint8_t accepted_tmgi[SMF_MBS_MAX_REQUESTS][SMF_MBS_TMGI_LEN];
++    int num_requests, num_results = 0, num_accepted = 0, i;
++    ogs_pkbuf_t *n1smbuf = NULL, *n2smbuf = NULL;
++    smf_ue_t *smf_ue = NULL;
++
++    ogs_assert(sess);
++    ogs_assert(stream);
++    ogs_assert(container);
++
++    smf_ue = smf_ue_find_by_id(sess->smf_ue_id);
++    ogs_assert(smf_ue);
++
++    num_requests = smf_mbs_parse_requested_container(
++            container->buffer, container->length, requests, SMF_MBS_MAX_REQUESTS);
++    if (num_requests < 0) {
++        n1smbuf = gsm_build_pdu_session_modification_reject(
++                sess, OGS_5GSM_CAUSE_SEMANTICALLY_INCORRECT_MESSAGE);
++        ogs_assert(n1smbuf);
++        smf_sbi_send_sm_context_update_error_n1_n2_message(
++                stream, OGS_SBI_HTTP_STATUS_BAD_REQUEST,
++                n1smbuf, OpenAPI_n2_sm_info_type_NULL, NULL);
++        return true;
++    }
++
++    for (i = 0; i < num_requests; i++) {
++        smf_mbs_sess_t *mbs_sess = NULL;
++        char hex[2 * SMF_MBS_TMGI_LEN + 1] = {0};
++
++        if (requests[i].session_id_type != SMF_MBS_SESSION_ID_TMGI) {
++            /* Joining by source specific IP multicast address is in the IE but not here: the MB-SMF
++             * indexes a multicast session by TMGI, and the SSM form would need the SSM index plus a
++             * decision about which TMGI to answer with. */
++            ogs_warn("MBS join by source specific IP multicast address is not supported");
++            continue;
++        }
++
++        tmgi_hex(requests[i].tmgi, hex, sizeof(hex));
++
++        if (requests[i].operation == SMF_MBS_OP_LEAVE) {
++            /* Leaving is MBS-MC-03/MBS-MC-04 and is not built yet. Answering "Remove UE from
++             * multicast MBS session" would be a lie, so the entry is left out of the answer. */
++            ogs_warn("[%s:%d] MBS leave of TMGI %s is not implemented, ignored",
++                    smf_ue->supi, sess->psi, hex);
++            continue;
++        }
++
++        memset(&results[num_results], 0, sizeof(results[num_results]));
++        memcpy(results[num_results].tmgi, requests[i].tmgi, SMF_MBS_TMGI_LEN);
++
++        mbs_sess = find_multicast_session(requests[i].tmgi);
++        if (!mbs_sess) {
++            ogs_warn("[%s:%d] MBS join of TMGI %s: no multicast session with that TMGI",
++                    smf_ue->supi, sess->psi, hex);
++            results[num_results].decision = SMF_MBS_DECISION_JOIN_REJECTED;
++            results[num_results].reject_cause = SMF_MBS_REJECT_CONTEXT_NOT_FOUND;
++            num_results++;
++            continue;
++        }
++
++        /* TS 23.247 V18.8.0 cl. 7.2.1.3 step 4 wants the MBS subscription data of the UDM here. The
++         * subscriber provisioning of this deployment has none, so every UE that reaches this point
++         * is authorised. One place to change when it does. */
++
++        ogs_assert(smf_mbs_member_add(mbs_sess, sess));
++        ogs_info("[%s:%d] joined multicast MBS session TMGI %s (%d member(s))",
++                smf_ue->supi, sess->psi, hex, ogs_list_count(&mbs_sess->member_list));
++
++        results[num_results].decision = SMF_MBS_DECISION_JOIN_ACCEPTED;
++        num_results++;
++
++        accepted[num_accepted] = mbs_sess;
++        memcpy(accepted_tmgi[num_accepted], requests[i].tmgi, SMF_MBS_TMGI_LEN);
++        num_accepted++;
++    }
++
++    if (!num_results) {
++        /* Nothing in the container this build acts on: let the caller handle the modification as it
++         * otherwise would. */
++        return false;
++    }
++
++    n1smbuf = build_modification_command(sess, results, num_results);
++    if (!n1smbuf) {
++        ogs_error("[%s:%d] could not build the PDU Session Modification Command",
++                smf_ue->supi, sess->psi);
++        n1smbuf = gsm_build_pdu_session_modification_reject(
++                sess, OGS_5GSM_CAUSE_PROTOCOL_ERROR_UNSPECIFIED);
++        ogs_assert(n1smbuf);
++        smf_sbi_send_sm_context_update_error_n1_n2_message(
++                stream, OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR,
++                n1smbuf, OpenAPI_n2_sm_info_type_NULL, NULL);
++        return true;
++    }
++
++    if (num_accepted) {
++        n2smbuf = ngap_build_pdu_session_resource_modify_request_transfer_mbs(
++                accepted_tmgi, num_accepted);
++        if (!n2smbuf) {
++            ogs_error("[%s:%d] could not build the N2 SM information of the join",
++                    smf_ue->supi, sess->psi);
++            ogs_pkbuf_free(n1smbuf);
++            n1smbuf = gsm_build_pdu_session_modification_reject(
++                    sess, OGS_5GSM_CAUSE_PROTOCOL_ERROR_UNSPECIFIED);
++            ogs_assert(n1smbuf);
++            smf_sbi_send_sm_context_update_error_n1_n2_message(
++                    stream, OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR,
++                    n1smbuf, OpenAPI_n2_sm_info_type_NULL, NULL);
++            return true;
++        }
++        smf_sbi_send_sm_context_updated_data_n1_n2_message(
++                sess, stream, n1smbuf, OpenAPI_n2_sm_info_type_PDU_RES_MOD_REQ, n2smbuf);
++    } else {
++        /* Every entry was rejected: cl. 7.2.1.3 step 5, "the message will not contain any MBS Session
++         * Context or the N2 SM information for the associated PDU session". The Modification Command
++         * still goes out, because the UE has to learn why. */
++        smf_sbi_send_sm_context_updated_data_n1_n2_message(
++                sess, stream, n1smbuf, OpenAPI_n2_sm_info_type_NULL, NULL);
++    }
++
++    /* Step 7a/8: the session has to be active in the RAN for the radio resources to be configured.
++     * Done after the per-UE N2 so the gNB has the MBS session context before it is told to activate
++     * it, which is the order cl. 7.2.1.3 puts steps 6 and 7a in. */
++    for (i = 0; i < num_accepted; i++)
++        activate_in_ran(accepted[i]);
++
++    return true;
++}
+diff --git a/src/smf/mbs-join.h b/src/smf/mbs-join.h
+new file mode 100644
+index 00000000..4ad98647
+--- /dev/null
++++ b/src/smf/mbs-join.h
+@@ -0,0 +1,114 @@
++/*
++ * MBS multicast join over NAS (TS 23.247 V18.8.0 clause 7.2.1.3).
++ *
++ * This file is part of Open5GS.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Affero General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#ifndef SMF_MBS_JOIN_H
++#define SMF_MBS_JOIN_H
++
++#include "context.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* A TMGI on the wire is 6 octets both in NAS (TS 24.501 V18.14.0 cl. 9.11.4.30: "coded as described in
++ * clause 10.5.6.13 in 3GPP TS 24.008 starting from octet 2" -- 3 octets of MBS Service ID then the
++ * PLMN) and in NGAP (TS 38.413 V17.10.0 cl. 9.3.1.153, TMGI ::= OCTET STRING (SIZE(6))). The two
++ * encodings are byte for byte the same, which is why one buffer serves both. */
++#define SMF_MBS_TMGI_LEN 6
++
++/* How many multicast MBS sessions one Requested MBS container may ask about. The IE itself allows up
++ * to 65535 octets of entries; this is what the SMF will act on in one request. */
++#define SMF_MBS_MAX_REQUESTS 8
++
++/* MBS operation, TS 24.501 V18.14.0 cl. 9.11.4.30 table 9.11.4.30.1 (bits 3 to 4 of octet 4) */
++typedef enum smf_mbs_operation_e {
++    SMF_MBS_OP_JOIN     = 1,
++    SMF_MBS_OP_LEAVE    = 2,
++} smf_mbs_operation_e;
++
++/* Type of multicast MBS session ID, same table (bits 1 to 2 of octet 4) */
++typedef enum smf_mbs_session_id_type_e {
++    SMF_MBS_SESSION_ID_TMGI     = 1,
++    SMF_MBS_SESSION_ID_SSM_IPV4 = 2,
++    SMF_MBS_SESSION_ID_SSM_IPV6 = 3,
++} smf_mbs_session_id_type_e;
++
++/* MBS decision, TS 24.501 V18.14.0 cl. 9.11.4.31 table 9.11.4.31.1 (bits 1 to 3 of octet 4) */
++typedef enum smf_mbs_decision_e {
++    SMF_MBS_DECISION_SERVICE_AREA_UPDATE = 1,
++    SMF_MBS_DECISION_JOIN_ACCEPTED       = 2,
++    SMF_MBS_DECISION_JOIN_REJECTED       = 3,
++    SMF_MBS_DECISION_REMOVE_UE           = 4,
++    SMF_MBS_DECISION_SECURITY_UPDATE     = 5,
++} smf_mbs_decision_e;
++
++/* Rejection cause, same table (bits 6 to 8 of octet 4) */
++typedef enum smf_mbs_reject_cause_e {
++    SMF_MBS_REJECT_NO_INFO              = 0,
++    SMF_MBS_REJECT_INSUFFICIENT_RES     = 1,
++    SMF_MBS_REJECT_NOT_AUTHORIZED       = 2,
++    SMF_MBS_REJECT_NOT_STARTED          = 3,
++    SMF_MBS_REJECT_OUTSIDE_SERVICE_AREA = 4,
++    SMF_MBS_REJECT_CONTEXT_NOT_FOUND    = 5,
++    SMF_MBS_REJECT_SESSION_RELEASED     = 6,
++} smf_mbs_reject_cause_e;
++
++/* One "multicast MBS session information" of a Requested MBS container */
++typedef struct smf_mbs_request_s {
++    smf_mbs_operation_e operation;
++    smf_mbs_session_id_type_e session_id_type;
++    uint8_t tmgi[SMF_MBS_TMGI_LEN];     /* set when session_id_type is TMGI */
++} smf_mbs_request_t;
++
++/* One "Received MBS information" of a Received MBS container */
++typedef struct smf_mbs_result_s {
++    smf_mbs_decision_e decision;
++    smf_mbs_reject_cause_e reject_cause; /* only read for JOIN_REJECTED and REMOVE_UE */
++    uint8_t tmgi[SMF_MBS_TMGI_LEN];
++} smf_mbs_result_t;
++
++/* The 6 wire octets of \p tmgi (see SMF_MBS_TMGI_LEN). Returns false when the TMGI has no service id
++ * or its service id is not 6 hex characters. */
++bool smf_mbs_tmgi_to_octets(const ogs_tmgi_t *tmgi, uint8_t *out);
++
++/** Parse the contents of a Requested MBS container (TS 24.501 V18.14.0 cl. 9.11.4.30).
++ *  \p buf / \p len are the container contents, i.e. what follows the IEI and the 2-octet length.
++ *  Returns the number of entries written to \p out, or -1 when the container is malformed. */
++int smf_mbs_parse_requested_container(
++        const uint8_t *buf, uint16_t len, smf_mbs_request_t *out, int max);
++
++/** Build the contents of a Received MBS container (TS 24.501 V18.14.0 cl. 9.11.4.31) into \p buf.
++ *  Only the mandatory part of each entry is produced: no IP addresses (IPAE=0), no MBS service area
++ *  (MSAI=00), no timers (MTI=00) and no security container (MSCI=0).
++ *  Returns the number of octets written, or -1 when \p size is too small. */
++int smf_mbs_build_received_container(
++        uint8_t *buf, uint16_t size, const smf_mbs_result_t *results, int num);
++
++/** Handle a PDU Session Modification Request that carries a Requested MBS container.
++ *  Answers \p stream itself (with a Modification Command, or a Modification Reject on a protocol
++ *  error) and returns true when it did. Returns false when the container asks for nothing this
++ *  build handles, in which case the caller carries on with the ordinary modification handling. */
++bool smf_mbs_handle_join(smf_sess_t *sess, ogs_sbi_stream_t *stream,
++        const ogs_nas_requested_mbs_container_t *container);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SMF_MBS_JOIN_H */
+diff --git a/src/smf/meson.build b/src/smf/meson.build
+index 2f4a0a21..234acb70 100644
+--- a/src/smf/meson.build
++++ b/src/smf/meson.build
+@@ -74,6 +74,7 @@ libsmf_sources = files('''
+     mbs-restore.h
+     mbs-charging.h
+     mbs-pcf.h
++    mbs-join.h
+     n4mb-build.h
+     n4mb-handler.h
+ 
+@@ -122,6 +123,7 @@ libsmf_sources = files('''
+     mbs-restore.c
+     mbs-charging.c
+     mbs-pcf.c
++    mbs-join.c
+     n4mb-build.c
+     n4mb-handler.c
+ '''.split())
+diff --git a/src/smf/namf-build.c b/src/smf/namf-build.c
+index b23a3a80..ffef436a 100644
+--- a/src/smf/namf-build.c
++++ b/src/smf/namf-build.c
+@@ -416,6 +416,91 @@ cleanup:
+     return request;
+ }
+ 
++/*
++ * Namf_MBSCommunication N2MessageTransfer (TS 29.518 V17.8.0 cl. 5.7.2.2): "used by the NF Service
++ * Consumer (e.g. MB-SMF) to request the AMF to transfer an MBS related N2 message to the NG-RAN nodes
++ * serving the multicast MBS session."
++ *
++ * The request carries the MBS Session ID in JSON and the already ASN.1-encoded NGAP transfer as a
++ * separate part of the multipart body, referenced by content id -- the same arrangement
++ * smf_namf_build_mbs_broadcast_context_create_request() above uses for its own N2 information. Which
++ * top-level NGAP procedure the AMF builds from it is chosen by ngapIeType, carried in \p data.
++ */
++ogs_sbi_request_t *smf_namf_build_mbs_comm_n2_message_transfer_request(
++        smf_mbs_sess_t *mbs_sess, void *data)
++{
++    ogs_sbi_message_t message;
++    ogs_sbi_request_t *request = NULL;
++
++    OpenAPI_mbs_n2_message_transfer_req_data_t *MbsN2MessageTransferReqData = NULL;
++    OpenAPI_mbs_comm_n2_mbs_sm_info_t *n2_mbs_sm_info = NULL;
++    OpenAPI_ref_to_binary_data_t *ngap_data = NULL;
++    OpenAPI_mbs_session_id_t *mbs_session_id = NULL;
++    OpenAPI_plmn_id_t *plmn_id = NULL;
++    OpenAPI_tmgi_t *tmgi = NULL;
++    char *mcc = NULL, *mnc = NULL;
++    OpenAPI_mbs_ngap_ie_type_e ngap_ie_type;
++    ogs_pkbuf_t *n2buf = NULL;
++
++    ogs_assert(mbs_sess);
++    ogs_assert(data);
++    ogs_assert(mbs_sess->tmgi);
++
++    ngap_ie_type = *(OpenAPI_mbs_ngap_ie_type_e *)data;
++
++    switch (ngap_ie_type) {
++    case OpenAPI_mbs_ngap_ie_type_MBS_SES_ACT_REQ:
++        n2buf = ngap_build_multicast_session_activation_request_transfer(mbs_sess->tmgi);
++        break;
++    default:
++        ogs_error("Namf_MBSCommunication N2MessageTransfer: ngapIeType [%d] is not built here",
++                ngap_ie_type);
++        return NULL;
++    }
++    if (!n2buf) {
++        ogs_error("Failed to build the N2 MBS SM information");
++        return NULL;
++    }
++
++    memset(&message, 0, sizeof(message));
++    message.h.method = (char *) OGS_SBI_HTTP_METHOD_POST;
++    message.h.service.name = (char *) OGS_SBI_SERVICE_NAME_NAMF_MBS_COMM;
++    message.h.api.version = (char *) OGS_SBI_API_V1;
++    message.h.resource.component[0] = (char *) OGS_SBI_RESOURCE_NAME_N2_MESSAGES;
++
++    mcc = ogs_plmn_id_mcc_string(&mbs_sess->tmgi->plmn_id);
++    mnc = ogs_plmn_id_mnc_string(&mbs_sess->tmgi->plmn_id);
++    plmn_id = OpenAPI_plmn_id_create(mcc, mnc);
++    tmgi = OpenAPI_tmgi_create(ogs_strdup(mbs_sess->tmgi->mbs_service_id), plmn_id);
++    mbs_session_id = OpenAPI_mbs_session_id_create(tmgi, NULL,
++            mbs_sess->mbs_session_id.nid ? ogs_strdup(mbs_sess->mbs_session_id.nid) : NULL);
++
++    ngap_data = OpenAPI_ref_to_binary_data_create(ogs_strdup((char *) OGS_SBI_CONTENT_NGAP_SM_ID));
++    n2_mbs_sm_info = OpenAPI_mbs_comm_n2_mbs_sm_info_create(ngap_ie_type, ngap_data);
++
++    /* areaSessionId is only for a location dependent MBS session (TS 29.532 V18.6.0 cl. 5.3.2.2.1);
++     * this one is not, so it is left out. */
++    MbsN2MessageTransferReqData = OpenAPI_mbs_n2_message_transfer_req_data_create(
++            mbs_session_id, false, 0, n2_mbs_sm_info, NULL);
++
++    message.MbsN2MessageTransferReqData = MbsN2MessageTransferReqData;
++
++    message.part[message.num_of_part].pkbuf = n2buf;
++    message.part[message.num_of_part].content_id = (char *) OGS_SBI_CONTENT_NGAP_SM_ID;
++    message.part[message.num_of_part].content_type = (char *) OGS_SBI_CONTENT_NGAP_TYPE;
++    message.num_of_part++;
++
++    message.http.accept = (char *) (OGS_SBI_CONTENT_JSON_TYPE "," OGS_SBI_CONTENT_PROBLEM_TYPE);
++
++    request = ogs_sbi_build_request(&message);
++    ogs_expect(request);
++
++    OpenAPI_mbs_n2_message_transfer_req_data_free(MbsN2MessageTransferReqData);
++    ogs_pkbuf_free(n2buf);
++
++    return request;
++}
++
+ /*
+  * 3GPP TS 29.518 - Release 17.11.0
+  * 5G System; Access and Mobility Management Services; Stage 3
+diff --git a/src/smf/namf-build.h b/src/smf/namf-build.h
+index 1ac20c6f..6add3dc3 100644
+--- a/src/smf/namf-build.h
++++ b/src/smf/namf-build.h
+@@ -51,6 +51,8 @@ ogs_sbi_request_t *smf_namf_callback_build_sm_context_status(
+ 
+ /* Namf_MBSBroadcast Service API */
+ 
++ogs_sbi_request_t *smf_namf_build_mbs_comm_n2_message_transfer_request(
++        smf_mbs_sess_t *mbs_sess, void *data);
+ ogs_sbi_request_t *smf_namf_build_mbs_broadcast_context_create_request(
+         smf_mbs_sess_t *mbs_sess, void *data);
+ 
+diff --git a/src/smf/ngap-build.c b/src/smf/ngap-build.c
+index b8c7c615..e69bde99 100644
+--- a/src/smf/ngap-build.c
++++ b/src/smf/ngap-build.c
+@@ -377,6 +377,90 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
+             &asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, &message);
+ }
+ 
++/* PDU Session Resource Modify Request Transfer carrying only the MBS sessions a UE joined
++ * (TS 38.413 V17.10.0 cl. 9.3.4.3 and the IE list PDUSessionResourceModifyRequestTransferIEs:
++ * id-MBSSessionSetuporModifyRequestList, ProtocolIE-ID 319, criticality ignore).
++ *
++ * TS 23.247 V18.8.0 cl. 7.2.1.3 step 5 calls this "the relation between the Multicast MBS Session
++ * Context and the UE's PDU Session context". Each item is an MBS Session ID and nothing else:
++ *
++ *   MBSSessionSetuporModifyRequestItem ::= SEQUENCE {
++ *       mBS-SessionID                                 MBS-SessionID,
++ *       mBS-AreaSessionID                             MBS-AreaSessionID   OPTIONAL,
++ *       associatedMBSQosFlowSetuporModifyRequestList  ...                 OPTIONAL,
++ *       mBS-QosFlowToReleaseList                      ...                 OPTIONAL, ... }
++ *
++ * The associated QoS flow list is for 5GC Individual MBS traffic delivery -- the fall-back for an
++ * NG-RAN that does not support MBS, where the multicast flows are carried in the PDU session's own
++ * unicast flows (cl. 7.2.1.3 step 5, "mapping information between unicast QoS flow(s) and multicast
++ * QoS flow(s)"). The RAN here supports MBS, cl. 7.2.1.3 step 6 says that with shared delivery "the
++ * associated unicast QoS flow information, if provided, is not used", and there are no multicast QoS
++ * flows to map yet, so it is left out.
++ *
++ * \p tmgi is \p num TMGIs in their 6-octet wire form (see smf_mbs_tmgi_to_octets()). */
++ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer_mbs(
++        const uint8_t tmgi[][6], int num)
++{
++    NGAP_PDUSessionResourceModifyRequestTransfer_t message;
++    NGAP_PDUSessionResourceModifyRequestTransferIEs_t *ie = NULL;
++    NGAP_MBSSessionSetuporModifyRequestList_t *MBSSessionSetuporModifyRequestList = NULL;
++    int i;
++
++    ogs_assert(tmgi);
++    ogs_assert(num > 0);
++
++    ogs_debug("PDUSessionResourceModifyRequestTransfer (MBS, %d session(s))", num);
++    memset(&message, 0, sizeof(message));
++
++    ie = CALLOC(1, sizeof(NGAP_PDUSessionResourceModifyRequestTransferIEs_t));
++    ogs_assert(ie);
++    ASN_SEQUENCE_ADD(&message.protocolIEs, ie);
++
++    ie->id = NGAP_ProtocolIE_ID_id_MBSSessionSetuporModifyRequestList;
++    ie->criticality = NGAP_Criticality_ignore;
++    ie->value.present =
++        NGAP_PDUSessionResourceModifyRequestTransferIEs__value_PR_MBSSessionSetuporModifyRequestList;
++
++    MBSSessionSetuporModifyRequestList =
++        &ie->value.choice.MBSSessionSetuporModifyRequestList;
++
++    for (i = 0; i < num; i++) {
++        NGAP_MBSSessionSetuporModifyRequestItem_t *item =
++            CALLOC(1, sizeof(NGAP_MBSSessionSetuporModifyRequestItem_t));
++        ogs_assert(item);
++        ASN_SEQUENCE_ADD(&MBSSessionSetuporModifyRequestList->list, item);
++
++        ogs_asn_buffer_to_OCTET_STRING(
++                (void *)tmgi[i], 6, &item->mBS_SessionID.tMGI);
++    }
++
++    return ogs_asn_encode(
++            &asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, &message);
++}
++
++/* Multicast Session Activation Request Transfer (TS 38.413 V17.10.0):
++ *
++ *   MulticastSessionActivationRequestTransfer ::= SEQUENCE {
++ *       mBS-SessionID   MBS-SessionID, iE-Extensions ... OPTIONAL, ... }
++ *
++ * i.e. the TMGI again and nothing else. The AMF's own builder
++ * (ngap_build_multicast_session_activation_request()) takes this as an opaque octet string and wraps
++ * it into the top-level NGAP PDU, which is why the MB-SMF has to encode it. */
++ogs_pkbuf_t *ngap_build_multicast_session_activation_request_transfer(ogs_tmgi_t *tmgi)
++{
++    NGAP_MulticastSessionActivationRequestTransfer_t message;
++
++    ogs_assert(tmgi);
++
++    ogs_debug("MulticastSessionActivationRequestTransfer");
++    memset(&message, 0, sizeof(message));
++
++    ogs_ngap_5gs_tmgi_to_ASN(tmgi, &message.mBS_SessionID.tMGI);
++
++    return ogs_asn_encode(
++            &asn_DEF_NGAP_MulticastSessionActivationRequestTransfer, &message);
++}
++
+ ogs_pkbuf_t *ngap_build_pdu_session_resource_release_request_transfer(
+         smf_sess_t *sess, NGAP_Cause_PR group, long cause)
+ {
+diff --git a/src/smf/ngap-build.h b/src/smf/ngap-build.h
+index b35aa603..185c4209 100644
+--- a/src/smf/ngap-build.h
++++ b/src/smf/ngap-build.h
+@@ -31,6 +31,11 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_setup_request_transfer(
+ 
+ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
+         smf_sess_t *sess, bool qos_presence);
++ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer_mbs(
++        const uint8_t tmgi[][6], int num);
++ogs_pkbuf_t *ngap_build_multicast_session_activation_request_transfer(
++        ogs_tmgi_t *tmgi);
++
+ ogs_pkbuf_t *ngap_build_pdu_session_resource_release_request_transfer(
+         smf_sess_t *sess, NGAP_Cause_PR group, long cause);
+ 
+diff --git a/src/smf/sbi-path.c b/src/smf/sbi-path.c
+index a014557a..3f586c0f 100644
+--- a/src/smf/sbi-path.c
++++ b/src/smf/sbi-path.c
+@@ -705,6 +705,29 @@ static void mbs_bc_reset_cached_instance(smf_mbs_sess_t *mbs_sess)
+     mbs_sess->sbi.service_type_array[OGS_SBI_SERVICE_TYPE_NAMF_MBS_BC].validity_timeout = 0;
+ }
+ 
++/* Ask the AMF to put an MBS related N2 message on N2 (TS 29.518 V17.8.0 cl. 5.7.2.2,
++ * Namf_MBSCommunication N2MessageTransfer). Unlike Namf_MBSBroadcast, this service keeps no context,
++ * so there is no AMF entry to address: the request goes to whichever AMF the SCP resolves, and the
++ * AMF relays it to the NG-RAN nodes it serves. */
++int smf_sbi_send_mbs_comm_n2_message_transfer(
++        smf_mbs_sess_t *mbs_sess, OpenAPI_mbs_ngap_ie_type_e ngap_ie_type)
++{
++    ogs_assert(mbs_sess);
++
++    /* The cached instance of the service is cleared for the same reason the broadcast calls clear
++     * theirs: an instance cached from another AMF service has no namf-mbs-comm entry in its
++     * nf_service_list, and the request would then go out with a portless target apiRoot. */
++    mbs_sess->sbi.service_type_array[OGS_SBI_SERVICE_TYPE_NAMF_MBS_COMM].nf_instance = NULL;
++    mbs_sess->sbi.service_type_array[OGS_SBI_SERVICE_TYPE_NAMF_MBS_COMM].validity_timeout = 0;
++
++    /* The address of a local is safe here: ogs_sbi_xact_add() calls the build function before it
++     * returns, the same way the broadcast ContextUpdate passes its stack smf_namf_context_update_param_t. */
++    return smf_sbi_old_discover_and_send(
++            OGS_SBI_SERVICE_TYPE_NAMF_MBS_COMM, NULL,
++            smf_namf_build_mbs_comm_n2_message_transfer_request,
++            mbs_sess, NULL, 0, &ngap_ie_type);
++}
++
+ int smf_sbi_send_mbs_broadcast_context_delete_all(smf_mbs_sess_t *mbs_sess)
+ {
+     smf_mbs_amf_t *amf = NULL;
+diff --git a/src/smf/sbi-path.h b/src/smf/sbi-path.h
+index d6c32237..9186a9c3 100644
+--- a/src/smf/sbi-path.h
++++ b/src/smf/sbi-path.h
+@@ -116,6 +116,8 @@ int smf_sbi_send_mbs_broadcast_context_create(smf_mbs_sess_t *mbs_sess);
+ 
+ /* Namf_MBSBroadcast ContextRelease towards every AMF that has a context of the MBS session. Returns the number of
+  * requests that could not be sent. */
++int smf_sbi_send_mbs_comm_n2_message_transfer(
++        smf_mbs_sess_t *mbs_sess, OpenAPI_mbs_ngap_ie_type_e ngap_ie_type);
+ int smf_sbi_send_mbs_broadcast_context_delete_all(smf_mbs_sess_t *mbs_sess);
+ 
+ /* A StatusNotify request to the notification URI of a status subscription */
+diff --git a/tests/unit/smf-mbs-test.c b/tests/unit/smf-mbs-test.c
+index fe874ffb..1762dfda 100644
+--- a/tests/unit/smf-mbs-test.c
++++ b/tests/unit/smf-mbs-test.c
+@@ -26,6 +26,7 @@
+ #include "mbs-restore.h"
+ #include "mbs-charging.h"
+ #include "mbs-pcf.h"
++#include "mbs-join.h"
+ #include "asn_internal.h"
+ 
+ static int checks, failures;
+@@ -5893,6 +5894,244 @@ static void test_query_all_urrs(void)
+     smf_mbs_sess_release(mbs_sess);
+ }
+ 
++/*
++ * The Requested MBS container, TS 24.501 V18.14.0 cl. 9.11.4.30. One TMGI entry is 7 octets: the
++ * octet carrying the ID type and the operation, then the 6-octet TMGI.
++ */
++static void test_requested_mbs_container(void)
++{
++    smf_mbs_request_t out[SMF_MBS_MAX_REQUESTS];
++    int n;
++
++    /* one join of TMGI 0xabcdef / PLMN 999-70 */
++    {
++        const uint8_t buf[] = {
++            0x05,                                       /* ID type 01 (TMGI), operation 01 (join) */
++            0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07,
++        };
++        n = smf_mbs_parse_requested_container(buf, sizeof(buf), out, SMF_MBS_MAX_REQUESTS);
++        CHECK(n == 1);
++        if (n == 1) {
++            CHECK(out[0].operation == SMF_MBS_OP_JOIN);
++            CHECK(out[0].session_id_type == SMF_MBS_SESSION_ID_TMGI);
++            CHECK(memcmp(out[0].tmgi, buf + 1, SMF_MBS_TMGI_LEN) == 0);
++        }
++    }
++
++    /* two entries, the second a leave: both are reported, the caller decides what to do with them */
++    {
++        const uint8_t buf[] = {
++            0x05, 0x00, 0x00, 0x01, 0x99, 0xf9, 0x07,
++            0x09, 0x00, 0x00, 0x02, 0x99, 0xf9, 0x07,   /* operation 10 (leave) */
++        };
++        n = smf_mbs_parse_requested_container(buf, sizeof(buf), out, SMF_MBS_MAX_REQUESTS);
++        CHECK(n == 2);
++        if (n == 2) {
++            CHECK(out[0].operation == SMF_MBS_OP_JOIN);
++            CHECK(out[1].operation == SMF_MBS_OP_LEAVE);
++            CHECK(out[1].tmgi[2] == 0x02);
++        }
++    }
++
++    /* the SSM forms are 8 and 32 octets of session ID and are skipped over, not misparsed */
++    {
++        const uint8_t buf[] = {
++            0x06,                                       /* ID type 10 (SSM IPv4), join */
++            192, 168, 77, 20, 239, 0, 0, 25,
++            0x05, 0x00, 0x00, 0x03, 0x99, 0xf9, 0x07,   /* a TMGI join after it */
++        };
++        n = smf_mbs_parse_requested_container(buf, sizeof(buf), out, SMF_MBS_MAX_REQUESTS);
++        CHECK(n == 2);
++        if (n == 2) {
++            CHECK(out[0].session_id_type == SMF_MBS_SESSION_ID_SSM_IPV4);
++            CHECK(out[1].session_id_type == SMF_MBS_SESSION_ID_TMGI);
++            CHECK(out[1].tmgi[2] == 0x03);
++        }
++    }
++
++    /* a truncated entry is a malformed IE, not a short read */
++    {
++        const uint8_t buf[] = { 0x05, 0xab, 0xcd, 0xef };
++        CHECK(smf_mbs_parse_requested_container(buf, sizeof(buf), out, SMF_MBS_MAX_REQUESTS) == -1);
++    }
++
++    /* "All other values are reserved": the entry has no known length, so the IE cannot be walked */
++    {
++        const uint8_t buf[] = { 0x04, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07 };
++        CHECK(smf_mbs_parse_requested_container(buf, sizeof(buf), out, SMF_MBS_MAX_REQUESTS) == -1);
++    }
++    {
++        const uint8_t buf[] = { 0x0d, 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07 }; /* operation 11 */
++        CHECK(smf_mbs_parse_requested_container(buf, sizeof(buf), out, SMF_MBS_MAX_REQUESTS) == -1);
++    }
++
++    /* an empty container has no entries and is not an error */
++    CHECK(smf_mbs_parse_requested_container((const uint8_t *)"", 0, out, SMF_MBS_MAX_REQUESTS) == 0);
++}
++
++/*
++ * The Received MBS container, TS 24.501 V18.14.0 cl. 9.11.4.31. Octet 4 is
++ * rejection cause (bits 6-8) | MSAI (bits 4-5) | MD (bits 1-3); octet 5 is all zero here because no
++ * optional field is produced; then the TMGI.
++ */
++static void test_received_mbs_container(void)
++{
++    smf_mbs_result_t results[2];
++    uint8_t buf[64];
++    int len;
++
++    memset(results, 0, sizeof(results));
++    memcpy(results[0].tmgi, "\xab\xcd\xef\x99\xf9\x07", SMF_MBS_TMGI_LEN);
++    results[0].decision = SMF_MBS_DECISION_JOIN_ACCEPTED;
++
++    len = smf_mbs_build_received_container(buf, sizeof(buf), results, 1);
++    CHECK(len == 8);
++    if (len == 8) {
++        CHECK(buf[0] == 0x02);          /* MD = 010, MSAI = 00, no rejection cause */
++        CHECK(buf[1] == 0x00);
++        CHECK(memcmp(buf + 2, results[0].tmgi, SMF_MBS_TMGI_LEN) == 0);
++    }
++
++    /* a rejection carries its cause in bits 6 to 8 */
++    results[0].decision = SMF_MBS_DECISION_JOIN_REJECTED;
++    results[0].reject_cause = SMF_MBS_REJECT_CONTEXT_NOT_FOUND;     /* 101 */
++    len = smf_mbs_build_received_container(buf, sizeof(buf), results, 1);
++    CHECK(len == 8);
++    if (len == 8)
++        CHECK(buf[0] == ((5 << 5) | 3));
++
++    /* an accepted entry has those bits spare even when the caller left a cause in the struct */
++    results[0].decision = SMF_MBS_DECISION_JOIN_ACCEPTED;
++    len = smf_mbs_build_received_container(buf, sizeof(buf), results, 1);
++    CHECK(len == 8);
++    if (len == 8)
++        CHECK(buf[0] == 0x02);
++
++    /* two entries are concatenated, nothing between them */
++    memcpy(results[1].tmgi, "\x00\x00\x02\x99\xf9\x07", SMF_MBS_TMGI_LEN);
++    results[1].decision = SMF_MBS_DECISION_JOIN_REJECTED;
++    results[1].reject_cause = SMF_MBS_REJECT_NOT_AUTHORIZED;        /* 010 */
++    len = smf_mbs_build_received_container(buf, sizeof(buf), results, 2);
++    CHECK(len == 16);
++    if (len == 16) {
++        CHECK(buf[8] == ((2 << 5) | 3));
++        CHECK(memcmp(buf + 10, results[1].tmgi, SMF_MBS_TMGI_LEN) == 0);
++    }
++
++    /* it never writes past the buffer it was given */
++    CHECK(smf_mbs_build_received_container(buf, 15, results, 2) == -1);
++}
++
++/* The two TMGI encodings agree: what smf_mbs_tmgi_to_octets() produces for NAS is what
++ * ogs_ngap_5gs_tmgi_to_ASN() produces for NGAP, which is what lets a TMGI read off a NAS container be
++ * compared with a session's TMGI without converting either. */
++static void test_tmgi_octets_match_ngap(void)
++{
++    ogs_tmgi_t tmgi;
++    uint8_t octets[SMF_MBS_TMGI_LEN];
++    NGAP_TMGI_t asn;
++
++    memset(&tmgi, 0, sizeof(tmgi));
++    memset(&asn, 0, sizeof(asn));
++    tmgi.mbs_service_id = ogs_strdup("Abcdef");
++    ogs_plmn_id_build(&tmgi.plmn_id, 999, 70, 2);
++
++    CHECK(smf_mbs_tmgi_to_octets(&tmgi, octets) == true);
++    ogs_ngap_5gs_tmgi_to_ASN(&tmgi, &asn);
++    CHECK(((OCTET_STRING_t *)&asn)->size == SMF_MBS_TMGI_LEN);
++    CHECK(memcmp(octets, ((OCTET_STRING_t *)&asn)->buf, SMF_MBS_TMGI_LEN) == 0);
++    /* hexadecimal of either case, as TS 29.571 Tmgi.mbsServiceId allows */
++    CHECK(octets[0] == 0xab && octets[1] == 0xcd && octets[2] == 0xef);
++
++    ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NGAP_TMGI, &asn);
++
++    /* a service id that is not 6 hex characters is refused rather than half-converted */
++    ogs_free(tmgi.mbs_service_id);
++    tmgi.mbs_service_id = ogs_strdup("abc");
++    CHECK(smf_mbs_tmgi_to_octets(&tmgi, octets) == false);
++    ogs_free(tmgi.mbs_service_id);
++    tmgi.mbs_service_id = NULL;
++    CHECK(smf_mbs_tmgi_to_octets(&tmgi, octets) == false);
++}
++
++/* The per-UE N2 of a join: a PDU Session Resource Modify Request Transfer whose only IE is
++ * id-MBSSessionSetuporModifyRequestList (TS 38.413 V17.10.0, ProtocolIE-ID 319), one item per MBS
++ * session, each carrying the 6-octet TMGI. Checked by decoding what was encoded, so the test fails if
++ * the IE is given the wrong id, criticality or ASN.1 shape. */
++static void test_modify_request_transfer_mbs(void)
++{
++    const uint8_t tmgi[2][6] = {
++        { 0xab, 0xcd, 0xef, 0x99, 0xf9, 0x07 },
++        { 0x00, 0x00, 0x02, 0x99, 0xf9, 0x07 },
++    };
++    ogs_pkbuf_t *pkbuf = NULL;
++    NGAP_PDUSessionResourceModifyRequestTransfer_t *decoded = NULL;
++    asn_dec_rval_t rv;
++
++    pkbuf = ngap_build_pdu_session_resource_modify_request_transfer_mbs(tmgi, 2);
++    CHECK(pkbuf != NULL);
++    if (!pkbuf) return;
++
++    rv = aper_decode(NULL, &asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer,
++            (void **)&decoded, pkbuf->data, pkbuf->len, 0, 0);
++    CHECK(rv.code == RC_OK);
++    if (rv.code == RC_OK && decoded) {
++        CHECK(decoded->protocolIEs.list.count == 1);
++        if (decoded->protocolIEs.list.count == 1) {
++            NGAP_PDUSessionResourceModifyRequestTransferIEs_t *ie =
++                decoded->protocolIEs.list.array[0];
++            CHECK(ie->id == NGAP_ProtocolIE_ID_id_MBSSessionSetuporModifyRequestList);
++            CHECK(ie->criticality == NGAP_Criticality_ignore);
++            CHECK(ie->value.present ==
++                NGAP_PDUSessionResourceModifyRequestTransferIEs__value_PR_MBSSessionSetuporModifyRequestList);
++            CHECK(ie->value.choice.MBSSessionSetuporModifyRequestList.list.count == 2);
++            if (ie->value.choice.MBSSessionSetuporModifyRequestList.list.count == 2) {
++                NGAP_MBSSessionSetuporModifyRequestItem_t *item =
++                    ie->value.choice.MBSSessionSetuporModifyRequestList.list.array[0];
++                CHECK(item->mBS_SessionID.tMGI.size == 6);
++                CHECK(memcmp(item->mBS_SessionID.tMGI.buf, tmgi[0], 6) == 0);
++                item = ie->value.choice.MBSSessionSetuporModifyRequestList.list.array[1];
++                CHECK(memcmp(item->mBS_SessionID.tMGI.buf, tmgi[1], 6) == 0);
++            }
++        }
++    }
++    ASN_STRUCT_FREE(asn_DEF_NGAP_PDUSessionResourceModifyRequestTransfer, decoded);
++    ogs_pkbuf_free(pkbuf);
++}
++
++/* The non-UE N2 of a join: MulticastSessionActivationRequestTransfer is just the MBS Session ID
++ * again. The AMF wraps this into the MULTICAST SESSION ACTIVATION REQUEST, so if the MB-SMF encodes
++ * the wrong thing here the gNB sees a well-formed PDU with an undecodable transfer. */
++static void test_multicast_activation_transfer(void)
++{
++    ogs_tmgi_t tmgi;
++    ogs_pkbuf_t *pkbuf = NULL;
++    NGAP_MulticastSessionActivationRequestTransfer_t *decoded = NULL;
++    asn_dec_rval_t rv;
++    uint8_t expected[SMF_MBS_TMGI_LEN];
++
++    memset(&tmgi, 0, sizeof(tmgi));
++    tmgi.mbs_service_id = ogs_strdup("abcdef");
++    ogs_plmn_id_build(&tmgi.plmn_id, 999, 70, 2);
++    CHECK(smf_mbs_tmgi_to_octets(&tmgi, expected) == true);
++
++    pkbuf = ngap_build_multicast_session_activation_request_transfer(&tmgi);
++    CHECK(pkbuf != NULL);
++    if (pkbuf) {
++        rv = aper_decode(NULL, &asn_DEF_NGAP_MulticastSessionActivationRequestTransfer,
++                (void **)&decoded, pkbuf->data, pkbuf->len, 0, 0);
++        CHECK(rv.code == RC_OK);
++        if (rv.code == RC_OK && decoded) {
++            CHECK(decoded->mBS_SessionID.tMGI.size == SMF_MBS_TMGI_LEN);
++            CHECK(memcmp(decoded->mBS_SessionID.tMGI.buf, expected, SMF_MBS_TMGI_LEN) == 0);
++        }
++        ASN_STRUCT_FREE(asn_DEF_NGAP_MulticastSessionActivationRequestTransfer, decoded);
++        ogs_pkbuf_free(pkbuf);
++    }
++
++    ogs_free(tmgi.mbs_service_id);
++}
++
+ int main(void)
+ {
+     /* ogs_app_initialize() initialises the core library itself */
+@@ -5970,6 +6209,11 @@ int main(void)
+     test_associated_session_id();
+     test_mbs_pcf_update();
+     test_mbs_pcf_release_continue();
++    test_requested_mbs_container();
++    test_received_mbs_container();
++    test_tmgi_octets_match_ngap();
++    test_modify_request_transfer_mbs();
++    test_multicast_activation_transfer();
+ 
+     printf("smf-mbs: %d checks, %d failed\n", checks, failures);
+     return failures ? 1 : 0;
+
+base-commit: 19149433f08f48d1d04bb62d5b5f9be1dcfd6c58
